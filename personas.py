@@ -763,8 +763,11 @@ def _accept(sock: socket.socket):
 
 def start(port: int):
     """开 ccpersona 的套接字（对话模式才开）。instance.json 的 persona_socket 写了就用它，没写放在数据目录里、按端口起名
-    （另起的测试实例和正式实例共用代码目录当数据目录，不能抢同一个）。所在目录要让运行 Claude 的用户进得去；
-    套接字本身谁都能连，认人靠内核报来的进程号。"""
+    （另起的测试实例和正式实例共用代码目录当数据目录，不能抢同一个）。所在目录要让运行 Claude 的用户进得去。
+    认人靠内核报来的进程号；Claude 以别的用户运行（run_as）或开了独立环境时，套接字要谁都能连，
+    否则 CLI 和查看器是同一个用户，只给本用户连，别的用户连门都摸不到。"""
+    import instance
+    import isolation
     global _sock, socket_path
     if _sock:
         return
@@ -772,7 +775,7 @@ def start(port: int):
     path.unlink(missing_ok=True)
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.bind(str(path))
-    os.chmod(path, 0o666)
+    os.chmod(path, 0o666 if instance.RUN_AS or isolation.enabled() else 0o600)
     s.listen(16)
     _sock, socket_path = s, str(path)
     threading.Thread(target=_accept, args=(s,), daemon=True, name="ccpersona-accept").start()

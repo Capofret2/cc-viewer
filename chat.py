@@ -201,7 +201,7 @@ except ImportError:
 VIEWER_RECALL = f"""
 
 翻以前的会话：
-- 要找以前会话里说过的话、提到过的事（回忆），用 `python3 {Path(__file__).parent}/sessions.py grep <词>`{_RECALL_NOTE}，\
+- 要找以前会话里说过的话、提到过的事（回忆），用 `{{recall_cmd}} grep <词>`{_RECALL_NOTE}，\
 不要自己写 grep 或脚本去扫会话记录。它一次搜全部会话的正文气泡，不含工具记录，几秒出结果，\
 最前面是总数和命中最多的会话，后面按会话分组（会话的先后随机）：每组开头写会话编号开头、会话主人和会话概况（新建和最后一条的时刻、气泡条数、上下文、花费、工作目录），组里每条给出时间和原文，按时间从旧到新。
 - 气泡分几类：`-u` 用户说的话，`-a` 助手说的话，`-s` 会话的 100 字短摘要（查看器在后台写的，很多会话还没有），`--long-summary` 1000 字长摘要；\
@@ -308,6 +308,18 @@ def name_cmd(private: bool) -> str:
     return "ccname" if private else NAME_CLIENT
 
 
+def recall_prompt() -> str:
+    """VIEWER_RECALL 填上这个实例的回忆命令（instance.RECALL_CMD）。经 ssh 跑的，远端的 shell 会把参数再拆一遍，要交代多包一层引号"""
+    import instance
+    cmd = instance.RECALL_CMD or f"python3 {Path(__file__).parent}/sessions.py"
+    text = VIEWER_RECALL.replace("{recall_cmd}", cmd)
+    if cmd.startswith("ssh "):
+        text = text.replace("不要自己写 grep 或脚本去扫会话记录。",
+                            "不要自己写 grep 或脚本去扫会话记录。这条命令经 ssh 在远端执行，参数里有空格时要多包一层引号，"
+                            "比如 `--from \"'10-25 20:00'\"`，不然会被拆成两个参数。", 1)
+    return text
+
+
 def viewer_prompt(private: bool, admin: bool) -> str:
     """这个会话追加在系统提示词后面的那段：private 是不是独立环境，admin 是会话主人能不能下载任何地方的文件。"""
     import instance
@@ -315,7 +327,7 @@ def viewer_prompt(private: bool, admin: bool) -> str:
     import personas
     return (VIEWER_DRAW + "\n\n" + VIEWER_FILES + ("" if admin else VIEWER_DOWNLOAD_LIMIT)
             + (VIEWER_SSH if private else "")
-            + (VIEWER_RECALL if instance.RECALL and admin and not private else "")
+            + (recall_prompt() if instance.RECALL and admin and not private else "")
             + (VIEWER_RECALL_USER.format(cmd=RECALL_CLIENT)
                if instance.RECALL_USERS and not admin and not private and personas.socket_path else "")
             + (VIEWER_PERSONA.format(cmd="ccpersona" if private else PERSONA_CLIENT, soft=personas.SOFT_TEXT,

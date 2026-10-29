@@ -120,6 +120,8 @@ CC_VIEWER_DATA=~/.cc-viewer python3 server.py --port 8777 --mode full
 - `pc_setup_url`：电脑安装、卸载脚本的对外地址，不设则使用打开页面时的地址
 - `default_model`、`default_effort`：新会话默认的模型和思考强度
 - `gw_socket`：开启 ssh 门卫，AI 可连接「设备」页登记的服务器
+- `recall`：设为 `true` 时，管理员的网页会话可以用 `sessions.py grep` 搜索以前所有会话的正文（系统提示词里会附上用法）；`recall_users` 设为 `true` 时，普通用户也可以用 `ccrecall` 搜索自己的会话
+- `recall_cmd`：会话里运行回忆搜索的命令（写到 `sessions.py` 为止），不设则在本机直接运行。Claude Code 以另一个系统用户运行（`run_as`）时读不到查看器的数据目录，可经 ssh 门卫以查看器的用户运行，格式见 `instance.py` 开头
 
 ## 接入模型
 

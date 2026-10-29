@@ -89,7 +89,10 @@
   请求直接打那个实例的本机接口，不读那边的登录文件，也不让那边的 API 端自动换号。remote_gpt 写一个 GPT 号列表，
   表示翻译层在本机、直接经闸门连（不靠 .bashrc 别名）。
 - 回忆搜索：recall 写 true，共用环境里查看器账号的网页会话在系统提示词里多一段 sessions.py grep 的用法（chat.VIEWER_RECALL）。
-  只有 Claude 以跑查看器的这个用户运行时才能用这个脚本（它要读查看器的数据目录），分了 run_as 的实例不要写。
+  这个脚本要读查看器的数据目录，默认的写法（本机直接运行 sessions.py）只有 Claude 以跑查看器的这个用户运行时才能用。
+  分了 run_as 的实例要另写 recall_cmd：会话里运行的回忆命令（到 sessions.py 为止，后面接 grep 和参数），
+  比如 "ssh <查看器账号在设备页登记的、以跑查看器的用户登录本机的连接> /路径/python /路径/sessions.py"。门卫只让登记这条连接的账号用它，
+  别的用户的会话照旧读不到。
 - 普通用户回忆：recall_users 写 true，共用环境里会话主人不是查看器账号的网页会话在系统提示词里多一段 ccrecall 的用法
   （chat.VIEWER_RECALL_USER），ccrecall 经人设卡接口的套接字由查看器以自己的身份只搜本实例里主人是他的会话（sessions.serve_request）。
   不写就不给说明，普通用户敲 ccrecall 会被拒；查看器账号敲 ccrecall 不受它限制（搜本实例全部会话），系统提示词里照旧只有上面那段。
@@ -161,6 +164,7 @@ GW_SOCKET: str | None = _conf.get("gw_socket")
 INSTRUCTIONS: str | None = _conf.get("instructions")       # 共用环境注入的说明（见开头）
 PERSONA_SOCKET: str | None = _conf.get("persona_socket")   # ccpersona 的套接字（见开头）
 RECALL: bool = bool(_conf.get("recall"))                    # 提示词里给不给回忆搜索的用法（见开头）
+RECALL_CMD: str | None = _conf.get("recall_cmd")            # 会话里运行回忆的命令，不写是本机直接运行 sessions.py（见开头）
 RECALL_USERS: bool = bool(_conf.get("recall_users"))        # 普通用户能不能用 ccrecall 回忆自己的会话（见开头）
 TODOS_SHARED: dict | None = _conf.get("todos_shared")       # 待办共用的文件和账号对应（见开头）
 CHANNELS: dict | None = _conf.get("channels")               # 频道存在哪份文件（见开头）
