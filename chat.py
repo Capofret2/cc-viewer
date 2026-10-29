@@ -419,13 +419,14 @@ def launch_env(account: str) -> dict[str, str]:
     # CC_VIEWER_PROXY：配了代理时这个号的代理。没有闸门时（开窗服务 keeper）由 claude_via_bashrc.sh 在 .bashrc 之后换上；
     # 有闸门时闸门优先，闸门自己按同一个端口转。没配代理（打开了 allow_direct）就不给，直连。
     # CLAUDE_CONFIG_DIR：这个号的配置目录（instance.json 的 accounts）；~/.bashrc 里没有同名别名时启动脚本直接运行 claude，靠它认号
-    # CC_VIEWER_ALIAS_ONLY：instance.json 写了 alias_only，~/.bashrc 里没有同名别名时启动脚本拒绝启动，不直接运行 claude
+    # CC_VIEWER_ALIAS_ONLY：instance.json 写了 alias_only，~/.bashrc 里没有同名别名时启动脚本拒绝启动，不直接运行 claude；
+    # 这时配置目录由别名定，不另给 CLAUDE_CONFIG_DIR（远端回环这类不经别名的照旧用 CLI 的默认目录）
     import personas
     return {"CC_ALIAS": account, "CLAUDE_CODE_ENTRYPOINT": "cli", "CC_VIEWER_LAUNCH": "1",
             # 状态栏脚本按这个认号：远端回环和 GPT 号都用默认的 ~/.claude，光看配置目录会认错（见 quota_statusline.account）
             "CC_VIEWER_ACCOUNT": account,
             **({"CC_VIEWER_PROXY": f"http://127.0.0.1:{proxy_port(account)}"} if proxy_port(account) else {}),
-            **({"CLAUDE_CONFIG_DIR": ACCOUNTS[account]} if ACCOUNTS[account] else {}),
+            **({"CLAUDE_CONFIG_DIR": ACCOUNTS[account]} if ACCOUNTS[account] and not ALIAS_ONLY else {}),
             **({"CC_VIEWER_ALIAS_ONLY": "1"} if ALIAS_ONLY else {}),
             **({"CC_VIEWER_GW": GW_SOCKET} if GW_SOCKET else {}),
             **({"CC_VIEWER_PERSONA": personas.socket_path} if personas.socket_path else {})}
