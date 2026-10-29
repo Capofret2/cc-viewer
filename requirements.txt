@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+claude-agent-sdk
+# 可选：数 DeepSeek 思考的 token（session.py），不装就不数
+# tokenizers

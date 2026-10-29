@@ -1,0 +1,90 @@
+{
+ "_说明": "各模型每百万 token 算几个点（1 点 = 5 小时额度的 1%）：in 输入、cw 缓存写入、cr 缓存命中、out 输出。GPT 模型的单位例外，是 GPT 号 5 小时额度的 1%，读的时候换成点（见 gpt-6-sol 的说明）；DeepSeek 模型也例外，写的是官方价（元，见 deepseek-flash 的说明）。由 analysis/fit_points.py --save 拟合写入；输入太少估不出来，按缓存写入的单价算。也可以写成另一个模型的倍数（of 是哪个模型、ratio 是倍数），由 rates.py 换算成四个单价",
+ "claude-opus-5-5": {
+  "in": 35.16,
+  "cw": 35.16,
+  "cr": 0.8045,
+  "out": 133.3,
+  "_拟合": "analysis/joint_fit.py：用 5 小时额度读数拟合，只用纯 Opus 的段（2128 段，涨幅合计 4895 个百分点，交叉验证均方根 1.62），按同期 5 小时 1% 合本周 0.1321 折成周限额，周限额 1% 按 14.74 点（价格以周限额为锚）"
+ },
+ "claude-sonnet-5-5": {
+  "of": "claude-opus-5-5",
+  "ratio": 0.75,
+  "_说明": "数据不够单独拟合出可信的绝对单价，按 Opus 5.5 的 0.75 倍算（analysis/sonnet_vs_opus.py 把 Opus 固定在这套单价上，几种算法给出 0.72～0.78）"
+ },
+ "claude-haiku-5-5": {
+  "of": "claude-opus-5-5",
+  "ratio": 0.2,
+  "_说明": "临时值：含 Haiku 5.5 的段太少，analysis/sonnet_vs_opus.py 算出 0.16～0.18，做不了交叉验证，数据多了再拟合"
+ },
+ "claude-haiku-4-5": {
+  "of": "claude-opus-5-5",
+  "ratio": 0.2,
+  "_说明": "Claude Code 自带的说明书助手子代理固定用旧版 Haiku（claude-haiku-4-5-20251001），表里没有就不收钱。没有数据拟合，先按 Haiku 5.5 的价（Opus 的 0.2 倍）算"
+ },
+ "gpt-6-sol": {
+  "in": 17.1,
+  "cw": 17.1,
+  "cr": 1.86,
+  "out": 107.0,
+  "_说明": "临时价（粗拟合的数）。GPT 模型这里写的单位不是点，是 GPT 号（ChatGPT Plus）5 小时额度的 1%，rates.load 乘 instance.GPT_SCALE 换成点（周额度同价）。用 Codex 的历史记录粗拟合（6 个窗口，读数是整数百分比）：未缓存输入 17.1、缓存命中 1.86、输出 107。OpenAI 的缓存没有单独的写入价，cw 和 in 一样"
+ },
+ "gpt-6-astra": {
+  "of": "gpt-6-sol",
+  "ratio": 5,
+  "_说明": "Codex 记录里 astra 的窗口太少拟合不出来，按 OpenAI 官方 Codex 积分费率表算，astra 的输入、缓存命中、输出都正好是 gpt-6-sol 的 5 倍（250/25/1250 对 50/5/250）。sol 的拟合比例和这张表几乎一样，所以订阅额度很可能也照它扣"
+ },
+ "gpt-6-luna": {
+  "of": "gpt-6-sol",
+  "ratio": 0.05,
+  "_说明": "没有数据，按 OpenAI 官方 Codex 积分费率表算，luna 的输入、缓存命中、输出都正好是 gpt-6-sol 的 1/20（2.5/0.25/12.5 对 50/5/250），理由同 gpt-6-astra"
+ },
+ "gpt-6.1-sol": {
+  "in": 17.1,
+  "cw": 17.1,
+  "cr": 0.93,
+  "out": 107.0,
+  "_说明": "没有数据，按 OpenAI 官方 Codex 积分费率表，gpt-6.1-sol 的输入、输出和 gpt-6-sol 一样（50/250），只有缓存命中是一半（2.5 对 5），所以缓存命中取 sol 的一半、其余照抄 sol。倍数写法只能整体乘一个数，所以写成四个数，sol 重新拟合时这里要跟着改"
+ },
+ "gpt-6-sol-fast": {
+  "of": "gpt-6-sol",
+  "ratio": 2.5,
+  "_说明": "快速档（模型名带 -fast，翻译层拆掉后缀、请求里带 service_tier priority，思考强度不变、出字更快）。暂且按普通档的 2.5 倍收，之后再拟合。下面三个快速档同样"
+ },
+ "gpt-6-astra-fast": {
+  "of": "gpt-6-astra",
+  "ratio": 2.5
+ },
+ "gpt-6-luna-fast": {
+  "of": "gpt-6-luna",
+  "ratio": 2.5
+ },
+ "gpt-6.1-sol-fast": {
+  "of": "gpt-6.1-sol",
+  "ratio": 2.5
+ },
+ "deepseek-flash": {
+  "in": 2,
+  "cw": 2,
+  "cr": 0.04,
+  "out": 8,
+  "_说明": "DeepSeek 按官方价收。这里的单位不是点，是元 / 百万 token，rates.load 换成点（rates.YUAN），收钱时正好是官方价。官方定价页（https://api-docs.deepseek.com/zh-cn/quick_start/pricing）的高峰价：缓存未命中 2 元、缓存命中 0.04 元、输出 8 元。DeepSeek 没有缓存写入价（自动缓存，回包里缓存写入一直是 0），cw 照未命中写"
+ },
+ "glm-5.3": {
+  "in": 0.3792,
+  "cw": 0.3792,
+  "cr": 0.2965,
+  "out": 0.3792,
+  "_说明": "智谱 GLM Coding Plan（469 元 / 月）按成本价收：一周 469 × 7 ÷ 30.4375 = 107.9 元，5 小时满窗口是本周的 1/5（官方 1600 次对 8000 次）。单位同 DeepSeek，是元 / 百万 token（高峰价，官方写 GLM-5.3 高峰 3 倍、非高峰 1 倍）。非高峰时段用 Claude Code 实测：每百万 token 合 5 小时额度的百分点，未命中输入 0.586（0.55～0.64）、缓存命中 0.458（0.44～0.49），换成元非高峰 0.1264、0.0988，这里写的是乘 3 的高峰价。输出没测出来（11.4 万 token 读数没动），先按未命中输入算，它只占 token 的零点几，对花费几乎没有影响。没有缓存写入价（回包里没有这一项），cw 照输入写"
+ },
+ "glm-5.3@offpeak": {
+  "of": "glm-5.3",
+  "ratio": 0.333333,
+  "_说明": "非高峰（peak.py：工作日 14～18 点以外、周末全天）：官方写 GLM-5.3「非高峰期 1 倍，高峰期 3 倍」"
+ },
+ "deepseek-flash@offpeak": {
+  "of": "deepseek-flash",
+  "ratio": 0.5,
+  "_说明": "空闲时段（peak.py）的调用：官方写「空闲时段价格为高峰时段价格的一半」，即未命中 1 元、命中 0.02 元、输出 4 元"
+ }
+}

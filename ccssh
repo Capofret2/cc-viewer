@@ -1,0 +1,298 @@
+#!/usr/bin/python3
+"""ccssh：经 ssh 门卫连自己登记的电脑和服务器。只能在网页上开的会话里用。
+  ccssh <目标> <命令…>                          在目标上执行命令，输出和退出码和 ssh 目标 命令 一样
+  ccssh add <名字> <用户@主机[:端口]> [--via <跳板>]   登记一个目标（跳板也要是自己登记过的），并试连一次
+  ccssh rm <名字>                               删掉一个目标
+  ccssh ls                                      列出自己登记的目标
+  ccssh key                                     显示自己的公钥（装到目标的 ~/.ssh/authorized_keys 里）
+  ccssh log [条数]                              看自己的连接记录
+  ccssh mount <目标>[:<远端路径>] <挂载点>        用 sshfs 把目标上的目录挂到本机（断线会自动重连），卸载用 fusermount -u <挂载点>
+传文件：rsync -e ccssh 本地 目标:远端路径，scp -S ccssh 本地 目标:远端路径（目标前面不要写 用户@，登录用户按登记来）。
+连接方式全由门卫按登记来定：只调连接快慢、日志多少的 ssh 选项（ConnectTimeout、ServerAliveInterval、-q、-T 这类）认得但不往下传，
+-n 照办；会改变连到哪、用什么身份、开什么转发的选项（-i、-l、-p、-J、-L、-R、-D、-A、-o ProxyCommand……）一律拒绝。
+"""
+# 上面那段是 --help 打印给会话里的 AI 看的，所以只写用法，不提查看器、别的用户和管理员
+# （不能有让 AI 觉察到共用环境、有人管着的提醒）。网页查看器（sshgw.py）的门卫；log 另有 --all，查看器账号看全部人的记录。
+# 共用环境的 ~/.local/bin 里有 ssh、sshfs、scp、sftp 四个同名包装（--as-ssh、--as-sshfs），
+# 独立环境的由查看器写进各自家目录（isolation.wrappers）：目标是自己登记过的就走门卫，否则照常用系统的；
+# ccssh 本身也在那里放了一个包装（代码目录不在 PATH 里）。
+import array
+import hashlib
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+REAL_SSH, REAL_SSHFS = "/usr/bin/ssh", "/usr/bin/sshfs"
+MANAGE = ("add", "rm", "ls", "key", "log", "mount", "umount")
+# 和门卫本来的做法一样的选项：只认这个值
+SAME = {"clearallforwardings": "yes", "permitlocalcommand": "no", "remotecommand": "none", "forwardagent": "no", "forwardx11": "no"}
+# 只管快慢、日志、本机缓存的选项：什么值都认，一律不往下传（门卫有自己的设定）
+TUNING = {"connecttimeout", "serveraliveinterval", "serveralivecountmax", "tcpkeepalive", "compression", "loglevel", "batchmode",
+          "stricthostkeychecking", "userknownhostsfile", "globalknownhostsfile", "identitiesonly", "controlmaster", "controlpath",
+          "controlpersist", "connectionattempts", "addressfamily", "requesttty", "exitonforwardfailure", "hashknownhosts",
+          "updatehostkeys", "checkhostip", "visualhostkey", "sendenv", "setenv"}
+FLAGS = set("xaTtqvC246")       # 同上，单字母的；-n 另外照办
+ARGOPTS = set("BbcDEeFIiJLlmOoPpQRSWw")   # ssh 里要带一个值的选项（找目标名时跳过它们的值）
+
+
+class Usage(Exception):
+    pass
+
+
+def parse(a: list[str]) -> dict:
+    """按 ssh 的规矩拆参数：选项可以在目标前后，「--」以后、或者目标后面第一个不是选项的词起，都是命令。"""
+    target, sub, done, nostdin, i = None, False, False, False, 0
+    while i < len(a):
+        x = a[i]
+        if not done and x == "--":
+            done = True
+        elif not done and x.startswith("-") and len(x) > 1:
+            j = 1
+            while j < len(x):
+                c = x[j]
+                if c == "o":
+                    val = x[j + 1:] or (a[i + 1] if i + 1 < len(a) else "")
+                    if not x[j + 1:]:
+                        i += 1
+                    k, _, v = val.replace(" ", "=", 1).partition("=")
+                    k, v = k.strip().lower(), v.strip().lower()
+                    if k not in TUNING and SAME.get(k) != v:
+                        raise Usage(f"不能带 ssh 选项 -o {val}，连接方式由门卫按登记来定")
+                    break
+                if c == "s":
+                    sub = True
+                elif c == "n":
+                    nostdin = True
+                elif c == "l":
+                    raise Usage("目标前面不要写 用户@，也不能用 -l：登录用户按登记来（ccssh ls 看）")
+                elif c not in FLAGS:
+                    raise Usage(f"不能带 ssh 选项 -{c}，连接方式由门卫按登记来定")
+                j += 1
+        elif target is None:
+            target = x
+            if done:   # 「-- 目标 命令」：目标后面全是命令
+                i += 1
+                break
+        else:
+            break
+        i += 1
+    cmd = a[i:]
+    if target is None:
+        raise Usage("要给出目标（ccssh ls 看已登记的）")
+    if sub:
+        if cmd != ["sftp"]:
+            raise Usage("-s 只支持 sftp（给 scp、sshfs 用的）")
+        return {"op": "sftp", "target": target, "nostdin": nostdin}
+    return {"op": "run", "target": target, "cmd": " ".join(cmd), "nostdin": nostdin}   # 和 ssh 一样，命令的几段用空格接起来
+
+
+def ask(path: str, req: dict, fds=(0, 1, 2)) -> int:
+    """把请求连同标准输入、输出、错误交给门卫，等它说退出码。连不上门卫抛 ConnectionError。"""
+    data = json.dumps(req, ensure_ascii=False).encode()
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(path)
+    except OSError as e:
+        raise ConnectionError(f"连不上门卫（{path}：{e}），门卫可能没开或正在重启") from e
+    frame = struct.pack("!I", len(data)) + data
+    n = s.sendmsg([frame], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds))])
+    s.sendall(frame[n:])
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(4096)
+        if not chunk:
+            print("ccssh：门卫那边断开了，没说结果", file=sys.stderr)
+            return 255
+        buf += chunk
+    return int(json.loads(buf).get("exit", 255))
+
+
+def registered(path: str, target: str) -> bool:
+    """门卫认得这个进程、而且它的主人登记过这个目标。认不出（终端里、无主会话）也当作没登记，由系统的 ssh 照常处理。"""
+    null = os.open(os.devnull, os.O_RDWR)
+    try:
+        return ask(path, {"op": "has", "target": target}, (null, null, null)) == 0
+    finally:
+        os.close(null)
+
+
+def send(path: str, req: dict) -> int:
+    fds = (0, 1, 2)
+    if req.pop("nostdin", False):   # ssh -n：标准输入换成 /dev/null
+        fds = (os.open(os.devnull, os.O_RDONLY), 1, 2)
+    if req["op"] == "run" and not req["cmd"].strip():
+        print("ccssh：要给出在那边执行的命令（不支持交互登录）", file=sys.stderr)
+        return 2
+    return ask(path, req, fds)
+
+
+def mount(spec: str, point: str, extra: list[str] = ()) -> int:
+    """在后台起 sshfs（前台模式 -f，自立一个会话），让它用 ccssh 当 ssh 程序；等挂载点真的挂上了再返回。
+    Claude 的会话结束了挂载照样在；断线重连时 sshfs 已经不在网页会话底下，门卫按第一次挂载时记下的这个会话（组长就是 sshfs）认人。
+    不让 sshfs 自己转成后台：那样它会换一个进程，门卫就对不上了。"""
+    target, _, rpath = spec.partition(":")
+    if not target or "@" in target:
+        raise Usage("挂载要写成 ccssh mount 目标[:远端路径] 挂载点（目标前面不要写 用户@）")
+    point = os.path.abspath(os.path.expanduser(point))
+    if os.path.ismount(point):
+        print(f"ccssh：{point} 已经挂着东西了（先 fusermount -u {point}）", file=sys.stderr)
+        return 2
+    os.makedirs(point, exist_ok=True)
+    # sshfs 的输出（包括以后重连时的报错）记在这里，挂不上时原样给出来
+    logdir = os.path.expanduser("~/.cache/ccssh")
+    os.makedirs(logdir, exist_ok=True)
+    log = os.path.join(logdir, f"mount-{hashlib.sha1(point.encode()).hexdigest()[:12]}.log")
+    opts = [f"ssh_command={os.path.realpath(__file__)}", "reconnect"] + list(extra)
+    if not any(o.startswith("idmap=") for o in opts):
+        opts.append("idmap=user")
+    with open(log, "w") as f:
+        p = subprocess.Popen([REAL_SSHFS, "-f", "-o", ",".join(opts), f"{target}:{rpath}", point],
+                             stdin=subprocess.DEVNULL, stdout=f, stderr=f, start_new_session=True)
+    t0 = time.time()
+    while time.time() - t0 < 60:
+        if p.poll() is not None:
+            with open(log) as f:
+                sys.stderr.write(f.read())
+            print(f"ccssh：挂载失败（sshfs 退出码 {p.returncode}）", file=sys.stderr)
+            return p.returncode or 1
+        if os.path.ismount(point):
+            print(f"挂好了：{target}:{rpath or '~'} → {point}（sshfs 进程 {p.pid}，日志 {log}；卸载用 fusermount -u {point}）")
+            return 0
+        time.sleep(0.2)
+    p.kill()
+    print("ccssh：等了 60 秒还没挂上，已经放弃", file=sys.stderr)
+    return 1
+
+
+def umount(point: str) -> int:
+    point = os.path.abspath(os.path.expanduser(point))
+    if not os.path.ismount(point):
+        print(f"ccssh：{point} 没有挂着东西", file=sys.stderr)
+        return 2
+    r = subprocess.run(["fusermount3" if os.path.exists("/usr/bin/fusermount3") else "fusermount", "-u", point],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode:
+        print(f"ccssh：卸载失败：{r.stderr.strip()}（有程序正在用里面的文件时卸不掉）", file=sys.stderr)
+        return r.returncode
+    print(f"卸载了 {point}")
+    return 0
+
+
+def find_host(a: list[str]) -> str | None:
+    """ssh 参数里的目标（跳过选项和它们的值）。"""
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x == "--":
+            return a[i + 1] if i + 1 < len(a) else None
+        if x.startswith("-") and len(x) > 1:
+            for j, c in enumerate(x[1:], 1):
+                if c in ARGOPTS:
+                    i += j == len(x) - 1   # 值在下一个参数里
+                    break
+            i += 1
+            continue
+        return x
+    return None
+
+
+def as_ssh(a: list[str], path: str | None) -> int:
+    """同名包装 ssh：目标是自己登记过的就走门卫，否则原样交给系统的 ssh（git@github.com、没登记的机器都照旧）。"""
+    host = find_host(a)
+    mine = False
+    if path and host and "@" not in host:
+        try:
+            mine = registered(path, host)
+        except Exception as e:   # 包装出了问题也不能把所有 ssh 都弄坏：说一声，交给系统的
+            print(f"ccssh：{e}，这次改用系统的 ssh", file=sys.stderr)
+    if mine:
+        return send(path, parse(a))
+    os.execv(REAL_SSH, [REAL_SSH] + a)
+
+
+def as_sshfs(a: list[str], path: str | None) -> int:
+    """同名包装 sshfs：远端是自己登记过的目标就照 ccssh mount 的办法挂（用户原来的 -o 选项照带），否则原样交给系统的 sshfs。"""
+    opts, pos, bad, i = [], [], None, 0
+    while i < len(a):
+        x = a[i]
+        if x == "-o" and i + 1 < len(a):
+            opts += a[i + 1].split(",")
+            i += 1
+        elif x.startswith("-o") and len(x) > 2:
+            opts += x[2:].split(",")
+        elif x in ("-f", "-s", "-C"):   # 本来就前台跑；-s 单线程、-C 压缩都无关紧要，不带
+            pass
+        elif x in ("-p", "-F") or x[:2] in ("-p", "-F"):
+            bad = x[:2]
+            i += x in ("-p", "-F")
+        elif x.startswith("-"):
+            pos = None   # 别的用法（-h、-V、调试）交给系统的 sshfs
+            break
+        else:
+            pos.append(x)
+        i += 1
+    mine = False
+    if pos and len(pos) == 2 and ":" in pos[0] and path:
+        host = pos[0].split(":", 1)[0]
+        try:
+            mine = "@" not in host and registered(path, host)
+        except Exception as e:
+            print(f"ccssh：{e}，这次改用系统的 sshfs", file=sys.stderr)
+    if mine:
+        if bad:
+            raise Usage(f"{bad} 用不了：端口和配置按门卫的登记来")
+        keep = [o for o in opts if o and o.split("=", 1)[0] not in ("ssh_command", "ssh_protocol", "directport", "password_stdin")]
+        return mount(pos[0], pos[1], keep)
+    os.execv(REAL_SSHFS, [REAL_SSHFS] + a)
+
+
+def main() -> int:
+    a = sys.argv[1:]
+    # 共用环境由查看器经 CC_VIEWER_GW 给；独立环境的包装自己带着 CCSSH_SOCKET（isolation.wrappers）
+    path = os.environ.get("CC_VIEWER_GW") or os.environ.get("CCSSH_SOCKET")
+    if a[:1] == ["--as-ssh"]:
+        return as_ssh(a[1:], path)
+    if a[:1] == ["--as-sshfs"]:
+        return as_sshfs(a[1:], path)
+    if not a or a[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0 if a else 2
+    if not path:
+        print("ccssh：只能在网页上开的会话里使用（不知道门卫在哪）", file=sys.stderr)
+        return 255
+    if a[0] == "add" and len(a) in (3, 5) and (len(a) == 3 or a[3] == "--via"):
+        req = {"op": "add", "name": a[1], "dest": a[2], "via": a[4] if len(a) == 5 else None}
+    elif a[0] == "rm" and len(a) == 2:
+        req = {"op": "rm", "name": a[1]}
+    elif a[0] in ("ls", "key") and len(a) == 1:
+        req = {"op": a[0]}
+    elif a[0] == "log" and len(a) <= 3:
+        rest = [x for x in a[1:] if x != "--all"]
+        req = {"op": "log", "all": "--all" in a, "n": int(rest[0]) if rest and rest[0].isdigit() else 20}
+    elif a[0] == "mount" and len(a) == 3:
+        return mount(a[1], a[2])
+    elif a[0] == "umount" and len(a) == 2:
+        return umount(a[1])
+    elif a[0] in MANAGE:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    else:
+        req = parse(a)
+    return send(path, req)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Usage as e:
+        print(f"ccssh：{e}", file=sys.stderr)
+        sys.exit(2)
+    except ConnectionError as e:
+        print(f"ccssh：{e}", file=sys.stderr)
+        sys.exit(255)
+    except KeyboardInterrupt:
+        sys.exit(130)

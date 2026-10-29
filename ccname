@@ -1,0 +1,65 @@
+#!/usr/bin/python3 -I
+"""ccname：给自己所在的这个会话起名。只能在网页上开的会话里用，改不了别的会话。
+  ccname                        显示现在的名字，以及是谁起的（用户自己起的、你起的、还没有名字）
+  ccname set <名字> [--force]    起名：不超过 6 个字（汉字和全角字符算一个，字母、数字和半角符号算半个）；
+                                现在的名字是用户自己起的就不覆盖，用户明确要你改时加 --force。
+                                等这一轮结束、后台任务都停下以后才写进去
+"""
+# 上面那段是 --help 打印给会话里的 AI 看的，只写用法。服务端是查看器的 naming.py，经人设卡接口的套接字（personas.py，op=name）：
+# 靠内核报来的进程号认出是哪个会话；套接字地址和 ccpersona 一样经环境变量 CC_VIEWER_PERSONA 给（独立环境写在家目录的同名包装里）。
+import json
+import os
+import socket
+import sys
+
+
+def parse(a: list[str]) -> dict | None:
+    if not a:
+        return {"op": "name"}
+    if a[0] == "set":
+        rest = [x for x in a[1:] if x != "--force"]
+        if len(rest) == 1 and not rest[0].startswith("--"):
+            return {"op": "name", "set": rest[0], "force": "--force" in a[1:]}
+    return None
+
+
+def main() -> int:
+    if sys.argv[1:2] in (["-h"], ["--help"], ["help"]):
+        print(__doc__.strip())
+        return 0
+    req = parse(sys.argv[1:])
+    if req is None:
+        print(f"ccname：参数不对：{' '.join(sys.argv[1:])}（名字里有空格要加引号）\n{__doc__.strip()}", file=sys.stderr)
+        return 2
+    path = os.environ.get("CC_VIEWER_PERSONA")
+    if not path:
+        print("ccname：只能在网页上开的会话里使用（这个会话里找不到查看器的接口）", file=sys.stderr)
+        return 2
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(20)
+    try:
+        s.connect(path)
+        s.sendall(json.dumps(req, ensure_ascii=False).encode() + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 16)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as e:
+        print(f"ccname：连不上查看器的接口（{path}：{e}），网页查看器可能正在重启，过一会儿再试", file=sys.stderr)
+        return 1
+    finally:
+        s.close()
+    try:
+        r = json.loads(buf)
+    except ValueError:
+        print("ccname：查看器的接口没回话就断开了", file=sys.stderr)
+        return 1
+    sys.stdout.write(r.get("out", ""))
+    sys.stderr.write(r.get("err", "").replace("ccpersona：", "ccname：", 1))
+    return int(r.get("exit", 1))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

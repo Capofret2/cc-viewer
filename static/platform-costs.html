@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>平台账单对账</title>
+<style>
+:root { color-scheme: light dark; --bg:#faf9f9; --card:#fff; --text:#1f2328; --muted:#6b7280; --line:#e3e5e8; --accent:#3b915d; }
+@media(prefers-color-scheme:dark) { :root { --bg:#17181b; --card:#202226; --text:#e5e7eb; --muted:#a3a8b1; --line:#393c42; --accent:#82bd92; } }
+* { box-sizing:border-box; } body { margin:0; padding:24px 16px; background:var(--bg); color:var(--text); font:14px/1.6 "PingFang SC","Microsoft YaHei",sans-serif; }
+main { max-width:1100px; margin:auto; } header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; } h1 { font-size:20px; margin:0; } button { font:inherit; border:1px solid var(--line); border-radius:8px; padding:6px 12px; color:var(--accent); background:var(--card); cursor:pointer; } button:disabled { opacity:.6; cursor:wait; }
+p { color:var(--muted); margin:10px 0; } #error { color:#c44949; white-space:pre-wrap; } .table { overflow:auto; background:var(--card); border:1px solid var(--line); border-radius:10px; }
+table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; } th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); white-space:nowrap; } th { color:var(--muted); font-weight:500; } td small { display:block; color:var(--muted); } .num { text-align:right; } details { white-space:normal; min-width:180px; max-width:340px; } summary { cursor:pointer; color:var(--accent); } .note { font-size:12px; } #pending { white-space:pre-wrap; }
+</style></head><body><main>
+<header><h1 id="title">平台账单对账</h1><button id="refresh">同步平台日志</button><button id="reload">重读本地记录</button></header>
+<p>内部核对页。日常费用已在原有气泡和会话总价中显示：尚未取得平台金额时显示预估，按请求编号对应后改用实扣。只有号主和查看器账号可以查看这里。</p>
+<p id="status">正在读取…</p><p id="error" role="alert"></p><p id="coverage" class="note"></p>
+<div class="table"><table><thead><tr><th>时间</th><th>模型 / 分组</th><th class="num">平台实扣（元）</th><th class="num">预期（元）</th><th class="num">差额（元）</th><th>对账 / 用量</th></tr></thead><tbody id="rows"></tbody></table></div>
+<p id="pending"></p>
+</main><script>
+'use strict';
+const account = new URLSearchParams(location.search).get('account') || '';
+const el = id => document.getElementById(id);
+const when = t => t ? new Date(t * 1000).toLocaleString('zh-CN', {hour12:false}) : '尚未同步';
+const money = n => n == null ? '待核对' : Number(n).toFixed(7);
+const kilo = n => n == null ? '未知' : (n / 1000).toFixed(3) + 'K';
+let busy = false;
+el('title').textContent = account + ' · 平台账单对账';
+function cell(tr, text, cls) { const td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; tr.append(td); return td; }
+function render(data) {
+  const s = data.state || {};
+  el('status').textContent = `最近成功同步：${when(s.success_at)} · 已保存 ${data.stored} 条 · 当前显示最近 ${data.rows.length} 条`;
+  el('error').textContent = s.error || '';
+  el('coverage').textContent = (s.coverage || '尚未同步平台记录。') + (s.possible_gap ? ' 注意：检测到前后批次没有重叠，历史可能存在缺口。' : '');
+  el('rows').replaceChildren();
+  for (const r of data.rows) {
+    const tr = document.createElement('tr');
+    cell(tr, when(r.created_at));
+    const model = cell(tr, r.model); const group = document.createElement('small'); group.textContent = r.group; model.append(group);
+    cell(tr, money(r.actual_yuan), 'num'); cell(tr, money(r.estimated_yuan), 'num'); cell(tr, money(r.delta_yuan), 'num');
+    const td = cell(tr, ''); const details = document.createElement('details'); const summary = document.createElement('summary');
+    summary.textContent = r.match + (r.use_differences && Object.keys(r.use_differences).length ? ' · 用量不一致' : ''); details.append(summary);
+    const use = r.use || {}; const info = document.createElement('div');
+    info.textContent = `平台用量：输入 ${kilo(use.in)}；输出 ${kilo(use.out)}；五分钟写入 ${kilo(use.cw5m)}；一小时写入 ${kilo(use.cw1h)}；命中 ${kilo(use.cr)}。`;
+    details.append(info);
+    const note = document.createElement('p'); note.className = 'note';
+    note.textContent = (r.estimate_source || '') + '。' + (r.price_note || '')
+      + (r.unpriced_1h_tokens ? ` 已知项费用 ${money(r.known_yuan)} 元，剩余实扣 ${money(r.unexplained_yuan)} 元；这不等于确定了未知单价。` : '')
+      + (r.within_precision ? ' 金额差小于平台计量精度 0.000002 元；仍保留原始差额。' : '')
+      + (r.local?.error ? ' 本地回包：' + r.local.error : '');
+    details.append(note);
+    if (r.use_differences && Object.keys(r.use_differences).length) {
+      const diff = document.createElement('div'); const names = {in:'输入',out:'输出',cw:'总写入',cr:'命中',cw1h:'一小时写入'};
+      diff.textContent = Object.entries(r.use_differences).map(([k,v]) => `${names[k]}：本地 ${kilo(v.local)} / 平台 ${kilo(v.platform)}`).join('；'); details.append(diff);
+    }
+    td.append(details); el('rows').append(tr);
+  }
+  el('pending').textContent = data.pending.length ? `另有 ${data.pending.length} 条本地请求尚未在已同步的平台日志中找到；可能尚未入账或不在平台返回范围内，不计作零费用。` : '';
+}
+async function load(sync) {
+  if (busy) return;
+  busy = true; el('refresh').disabled = el('reload').disabled = true;
+  el('status').textContent = sync ? '正在同步平台日志…' : '正在读取本地记录…'; el('error').textContent = '';
+  try {
+    const res = await fetch('/api/platform-costs/' + encodeURIComponent(account) + (sync ? '/refresh' : ''), {method:sync ? 'POST' : 'GET', cache:'no-store'});
+    const data = await res.json();
+    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `查询失败（${res.status}）`);
+    render(data);
+  } catch (e) { el('error').textContent = e.message; el('status').textContent = '本次查询失败；原有表格保留，未显示为零。'; }
+  finally { busy = false; el('refresh').disabled = el('reload').disabled = false; }
+}
+el('refresh').onclick = () => load(true); el('reload').onclick = () => load(false);
+load(false);
+</script></body></html>

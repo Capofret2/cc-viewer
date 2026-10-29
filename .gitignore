@@ -1,0 +1,23 @@
+# 数据目录默认就是代码目录（instance.py 的 DATA），运行时文件（用户名单、登录凭据、账本、会话设置、额度记录……）都会写在这里。
+# 所以这里反过来写：顶层一律忽略，只放行源码。新加源码文件、目录时记得在下面放行
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/requirements.txt
+!/instance.example.json
+!/points_rates.json
+!/*.py
+!/*.sh
+!/ccssh
+!/ccname
+!/ccpersona
+!/ccrun
+!/persona_hook
+!/static/
+!/sdk_client/
+!/tokenizers/
+!/personas/
+!/pc-tunnel/
+!/docs/
+__pycache__/

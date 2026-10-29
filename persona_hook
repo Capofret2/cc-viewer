@@ -1,0 +1,32 @@
+#!/usr/bin/python3 -I
+"""人设卡的文字钩子（personas.py）：Claude Code 到了时机执行它，它从这个会话的快照目录读钩子配置，把那段文字交回去。
+  persona_hook <时机> <第几组> <第几个>      快照目录由环境变量 CC_PERSONA_DIR 给（personas.launch_hooks 写在命令里）
+文字里的「{随机}」换成随机句子里的一句，没写这个记号就接在文字后面。每次触发都现读现打，改这个文件不用重启查看器。
+输出用 hookSpecificOutput.additionalContext：提交消息、会话开始时直接打的字也会进对话，但工具调用前后只认这种写法（实测）。
+出错时写到标准错误、退出码 1：Claude Code 只记一笔钩子出错，不拦这次操作。
+"""
+import json
+import os
+import random
+import sys
+
+
+def main() -> int:
+    sys.stdin.read()   # Claude Code 把这次的情况写在标准输入里，用不上，读完免得它那边写不进来
+    try:
+        event, gi, hi = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+        with open(os.path.join(os.environ["CC_PERSONA_DIR"], "hooks.json"), encoding="utf-8") as f:
+            hook = json.load(f)[event][gi]["hooks"][hi]
+    except (IndexError, KeyError, ValueError, OSError) as e:
+        print(f"人设卡钩子读不到配置：{type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    text, choices = hook.get("text", ""), hook.get("choices") or []
+    if choices:
+        pick = random.choice(choices)
+        text = text.replace("{随机}", pick) if "{随机}" in text else (text + "\n" + pick if text else pick)
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

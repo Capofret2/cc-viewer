@@ -1,0 +1,167 @@
+#!/usr/bin/python3 -I
+"""ccpersona：管理人设卡。新建会话时选的人设卡接在系统提示词最后；只能在网页上开的会话里用，管的是会话主人自己的卡。
+  ccpersona ls                                   列出自己的卡和别人公开的卡（第一列是编号）
+  ccpersona show <编号> [<文件名>]                 看一张卡的全文（正文、钩子、脚本和资料的清单）；带上文件名就看那个脚本或那份资料
+  ccpersona add <名字> <正文文件> [--public] [--hooks <文件>] [--script <文件>]... [--attach <文件>]...
+                                                 新建一张（文件写 - 就从标准输入读），--public 公开给大家用，
+                                                 --hooks 钩子配置（JSON，写法同 settings.json 的 hooks，另有 text 类型），
+                                                 --script 挂一个脚本、--attach 挂一份补充资料（文件名就是脚本名、资料名）
+  ccpersona edit <编号> [--name <新名字>] [--file <正文文件>] [--public | --private] [--hooks <文件> | --no-hooks]
+                 [--script <文件>]... [--drop-script <脚本名>]... [--attach <文件>]... [--detach <资料名>]...
+                                                 改自己的卡；钩子整份替换，同名的脚本、资料会被换掉
+  ccpersona rm <编号>                             删掉自己的卡（已经用它建好的会话不受影响）
+  ccpersona default <编号> | none                 设成新建会话时默认选的卡；none 是默认不用
+"""
+# 上面那段是 --help 打印给会话里的 AI 看的，只写用法。服务端是查看器的 personas.py：靠内核报来的进程号认出是哪个会话、会话主人是谁，
+# 套接字地址经环境变量 CC_VIEWER_PERSONA 给（共用环境由查看器拉起 CLI 时带上，独立环境写在家目录的同名包装里，isolation.persona_wrapper）。
+import json
+import os
+import socket
+import sys
+
+
+class Usage(Exception):
+    pass
+
+
+# 早期版本的参数，帮助里不再写：同一个客户端两个实例共用，没重启的那个查看器还认它们，
+# 它拉起的会话里 Claude 看到的也还是老用法；新的查看器 add 时换成等价的钩子，edit 时说明改用 --hooks（personas.handle）
+OLD, OLD_OFF = ("--remind", "--compact-remind"), ("--no-remind", "--no-compact-remind")
+
+
+def read_text(path: str) -> str:
+    if path == "-":
+        return sys.stdin.read()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        raise Usage(f"读不了 {path}：{e.strerror}") from None
+    except UnicodeDecodeError:
+        raise Usage(f"{path} 不是 UTF-8 文本") from None
+
+
+def named(path: str, what: str) -> dict:
+    if path == "-":
+        raise Usage(f"{what}要从文件读，文件名就是{what}的名字，不能用 -")
+    return {"name": os.path.basename(path.rstrip("/")), "text": read_text(path)}
+
+
+def hooks(path: str) -> dict:
+    try:
+        return json.loads(read_text(path))
+    except ValueError as e:
+        raise Usage(f"{path} 不是合法的 JSON：{e}") from None
+
+
+def options(rest: list[str], req: dict, known: tuple[str, ...]) -> list[str]:
+    """把 rest 里认得的选项收进 req，返回剩下的位置参数。--script、--drop-script、--attach、--detach 可以给好几次。"""
+    plain, i = [], 0
+    while i < len(rest):
+        x = rest[i]
+        if x not in known:
+            if x.startswith("--"):
+                raise Usage(f"不认识的参数 {x}")
+            plain.append(x)
+            i += 1
+        elif x in ("--public", "--private", "--no-hooks", "--no-remind", "--no-compact-remind"):
+            if x == "--no-hooks":
+                req["hooks"] = {}
+            elif x in ("--no-remind", "--no-compact-remind"):
+                req["remind" if x == "--no-remind" else "compact_remind"] = ""
+            else:
+                req["public"] = x == "--public"
+            i += 1
+        elif i + 1 >= len(rest):
+            raise Usage(f"{x} 后面要跟一个参数")
+        else:
+            v = rest[i + 1]
+            if x == "--name":
+                req["name"] = v
+            elif x == "--file":
+                req["text"] = read_text(v)
+            elif x == "--hooks":
+                req["hooks"] = hooks(v)
+            elif x in ("--remind", "--compact-remind"):
+                req["remind" if x == "--remind" else "compact_remind"] = read_text(v)
+            elif x == "--script":
+                req.setdefault("script", []).append(named(v, "脚本"))
+            elif x == "--drop-script":
+                req.setdefault("drop_script", []).append(v)
+            elif x == "--attach":
+                req.setdefault("attach", []).append(named(v, "补充资料"))
+            elif x == "--detach":
+                req.setdefault("detach", []).append(v)
+            i += 2
+    return plain
+
+
+def parse(a: list[str]) -> dict:
+    if not a or a[0] in ("-h", "--help", "help"):
+        raise Usage("")
+    op, rest = a[0], a[1:]
+    if op == "ls" and not rest:
+        return {"op": "ls"}
+    if op == "show" and len(rest) in (1, 2):
+        return {"op": "show", "id": rest[0], "file": rest[1] if len(rest) == 2 else None}
+    if op == "rm" and len(rest) == 1:
+        return {"op": op, "id": rest[0]}
+    if op == "default" and len(rest) == 1:
+        return {"op": "default", "id": None if rest[0] == "none" else rest[0]}
+    if op == "add":
+        req = {"op": "add", "public": False}
+        plain = options(rest, req, ("--public", "--hooks", "--script", "--attach") + OLD)
+        if len(plain) == 2:
+            return {**req, "name": plain[0], "text": read_text(plain[1])}
+    if op == "edit" and rest:
+        req = {"op": "edit", "id": rest[0]}
+        if plain := options(rest[1:], req, ("--name", "--file", "--public", "--private", "--hooks", "--no-hooks",
+                                            "--script", "--drop-script", "--attach", "--detach") + OLD + OLD_OFF):
+            raise Usage(f"不认识的参数 {plain[0]}")
+        if len(req) == 2:
+            raise Usage("edit 要给出改什么：--name、--file、--public、--private、--hooks、--no-hooks、"
+                        "--script、--drop-script、--attach 或 --detach")
+        return req
+    raise Usage(f"参数不对：{' '.join(a)}")
+
+
+def main() -> int:
+    try:
+        req = parse(sys.argv[1:])
+    except Usage as e:
+        if str(e):
+            print(f"ccpersona：{e}", file=sys.stderr)
+        print(__doc__.strip(), file=sys.stderr if str(e) else sys.stdout)
+        return 2 if str(e) else 0
+    path = os.environ.get("CC_VIEWER_PERSONA")
+    if not path:
+        print("ccpersona：只能在网页上开的会话里使用（这个会话里找不到人设卡接口）", file=sys.stderr)
+        return 2
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(20)
+    try:
+        s.connect(path)
+        s.sendall(json.dumps(req, ensure_ascii=False).encode() + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 16)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as e:
+        print(f"ccpersona：连不上人设卡接口（{path}：{e}），网页查看器可能正在重启，过一会儿再试", file=sys.stderr)
+        return 1
+    finally:
+        s.close()
+    try:
+        r = json.loads(buf)
+    except ValueError:
+        print("ccpersona：人设卡接口没回话就断开了", file=sys.stderr)
+        return 1
+    sys.stdout.write(r.get("out", ""))
+    sys.stderr.write(r.get("err", ""))
+    return int(r.get("exit", 1))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

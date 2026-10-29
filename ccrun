@@ -1,0 +1,99 @@
+#!/usr/bin/python3 -I
+"""ccrun：网页会话里的工作流客户端（内测），不读取任何模型凭据。
+
+  ccrun submit 请求.json    提交一次任务，立即返回；同一个 key 重试不会重复启动
+  ccrun run 请求.json       提交并等结果；交给 Bash 后台执行，结束后主代理再接着做
+  ccrun status 任务编号     查询状态和结果
+  ccrun wait 任务编号       重新等一份已提交的任务
+  ccrun cancel 任务编号     取消，不自动重发
+  ccrun list               最近一百份任务
+  ccrun pool               号池此刻的样子（5 小时余量、近 30 分钟用量、本周余量……），跑实验前挑号用，
+                           挑好写进环境变量 CCVIEWER_ACCOUNT 再起实验脚本
+
+请求文件写 - 时从标准输入读。标准输出始终是 JSON，进度和报错写标准错误。
+连接沿用 CC_VIEWER_PERSONA；服务端用内核提供的进程号认出发起会话，不收自报身份。
+请求示例：{"key":"paper1-r1-review1","prompt":"正文","model":"claude-opus-5-5","effort":"high"}
+文件任务再给 cwd、tools、read_files、write_files；目前文件必须事先存在且在工作区内。
+"""
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+
+TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+
+
+def request(req):
+    path = os.environ.get("CC_VIEWER_PERSONA")
+    if not path:
+        raise RuntimeError("找不到查看器本机接口，请在网页会话里执行，不要经 SSH 代发")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(20)
+        s.connect(path)
+        s.sendall(json.dumps({"op": "workflow", "request": req}, ensure_ascii=False).encode() + b"\n")
+        buf = bytearray()
+        while not buf.endswith(b"\n"):
+            part = s.recv(65536)
+            if not part:
+                raise RuntimeError("查看器未确认就断开了；保留原 key 查询，不要换 key 重发")
+            buf.extend(part)
+            if len(buf) > 32 << 20:
+                raise RuntimeError("返回超过 32 MB，未截断结果")
+    reply = json.loads(buf)
+    if reply.get("exit"):
+        raise RuntimeError(reply.get("err") or "查看器拒绝请求")
+    return json.loads(reply["out"])
+
+
+def wait(jid):
+    previous = None
+    while True:
+        result = request({"op": "status", "id": jid})
+        state = result["state"]
+        if state != previous:
+            print(f"{result.get('label', '任务')}：{state}", file=sys.stderr, flush=True)
+            previous = state
+        if state in TERMINAL:
+            return result
+        time.sleep(3)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("op", choices=["submit", "run", "status", "wait", "cancel", "list", "pool"])
+    parser.add_argument("target", nargs="?")
+    a = parser.parse_args()
+    try:
+        if a.op in {"submit", "run"}:
+            if not a.target:
+                parser.error("需要请求文件或 -")
+            if a.target == "-":
+                task = json.load(sys.stdin)
+            else:
+                with open(a.target, encoding="utf-8") as f:
+                    task = json.load(f)
+            result = request({"op": "submit", "task": task})
+            print("任务已登记：" + result["id"], file=sys.stderr, flush=True)
+            if a.op == "run" and result["state"] not in TERMINAL:
+                result = wait(result["id"])
+        elif a.op == "wait":
+            if not a.target:
+                parser.error("需要任务编号")
+            result = wait(a.target)
+        elif a.op == "pool":
+            result = request({"op": "pool"})
+        else:
+            if a.op != "list" and not a.target:
+                parser.error("需要任务编号")
+            result = request({"op": a.op, "id": a.target})
+        print(json.dumps(result, ensure_ascii=False), flush=True)
+        return 0 if result.get("state") not in TERMINAL - {"completed"} else 1
+    except (OSError, ValueError, RuntimeError) as e:
+        print(f"ccrun：{e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

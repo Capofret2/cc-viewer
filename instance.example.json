@@ -1,0 +1,7 @@
+{
+  "_说明": "复制成数据目录里的 instance.json 再改；每一项的说明见 instance.py 开头。这是单用户、两个 Claude 号、不用代理的写法。",
+  "accounts": {"claude": null, "work": "~/.claude-work"},
+  "free": ["claude", "work"],
+  "default_model": "claude-opus-5-5",
+  "default_effort": "high"
+}

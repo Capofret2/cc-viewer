@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>分享的会话</title>
+<style>
+:root{color-scheme:light dark;font:16px/1.65 system-ui,-apple-system,"Noto Sans CJK SC",sans-serif;background:#faf9f9;color:#242a30}
+*{box-sizing:border-box}body{margin:0}header{position:sticky;top:0;background:#faf9f9f2;border-bottom:1px solid #dde2e5;padding:12px max(18px,calc((100% - 920px)/2));z-index:1}header strong{display:block;font-size:18px;overflow-wrap:anywhere}header small{color:#69747d}main{max-width:920px;margin:24px auto;padding:0 18px 64px}.entry{margin:12px 0;padding:16px 20px;border:1px solid #e1e5e9;border-radius:14px;background:#fff;overflow-wrap:anywhere}.entry.user{background:#eaf5ee;border-color:#d4e8da}.entry.result,.entry.tool{background:#f9fafb}.entry .meta{display:flex;gap:10px;align-items:baseline;color:#69747d;font-size:13px;margin-bottom:6px}.entry .meta b{color:#375c48}p{margin:8px 0;white-space:pre-wrap}h2,h3,h4{line-height:1.35;margin:15px 0 5px}pre{white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere;background:#eef1f3;border-radius:8px;padding:12px;font:13px/1.6 ui-monospace,SFMono-Regular,monospace}code{font-family:ui-monospace,SFMono-Regular,monospace}p code{background:#eef1f3;padding:2px 4px;border-radius:4px}img{display:block;max-width:100%;max-height:85vh;object-fit:contain;margin:12px 0;border-radius:6px}a{color:#167447}details{margin-top:8px}summary{cursor:pointer}blockquote{border-left:3px solid #9dbbad;margin:10px 0;padding:1px 12px;color:#59665c}.error{color:#9e3140}#state{padding:14px 18px;text-align:center;color:#69747d}@media(prefers-color-scheme:dark){:root{background:#17191d;color:#e9edf0}header{background:#17191df2;border-color:#343b42}header small,.entry .meta,#state{color:#a5b0b9}.entry{background:#22272d;border-color:#343b42}.entry.user{background:#203529;border-color:#315641}.entry.result,.entry.tool{background:#1e2329}.entry .meta b{color:#90dab1}pre,p code{background:#303740}blockquote{color:#afc1b4;border-color:#567360}a{color:#8de0aa}.error{color:#ff9ca4}}
+</style>
+</head>
+<body>
+<header><strong id="title">分享的会话</strong><small>持有此链接者可查看此会话，但不能修改或发送消息。示意图中的 HTML 和脚本仅显示源码，不会执行。</small></header>
+<div id="state">正在读取会话…</div><main id="content"></main>
+<script>
+'use strict';
+// 不插入会话提供的 HTML：文本一律由浏览器当作文字节点排版，图片只用服务端逐张核对的专用地址。
+const base = location.pathname.replace(/\/$/, ''), content = document.getElementById('content');
+const node = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = String(text); if (cls) e.className = cls; return e; };
+function inline(parent, text) {
+  const re = /(!\[([^\]]*)\]\(([^\s)]+)(?:\s+[^)]*)?\))|(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(`([^`]+)`)|(\*\*([^*]+)\*\*)/g;
+  let at = 0, m;
+  while ((m = re.exec(text))) {
+    parent.append(document.createTextNode(text.slice(at, m.index)));
+    if (m[1]) {
+      const path = m[3].startsWith('file://') ? m[3].slice(7) : m[3];
+      const key = window._files?.[path], external = /^https?:\/\/[^\s]+$/i.test(path);
+      if (key || external) { const img = node('img'); img.src = external ? path : `${base}/file/${key}`; img.referrerPolicy = 'no-referrer'; img.alt = m[2] || '会话引用的图片'; img.onerror = () => { img.replaceWith(node('span', `图片无法显示：${path}`, 'error')); }; parent.append(img); }
+      else parent.append(document.createTextNode(m[1]));
+    } else if (m[4]) {
+      const a = node('a', m[5]); a.href = m[6]; a.target = '_blank'; a.rel = 'noopener noreferrer'; parent.append(a);
+    } else if (m[7]) parent.append(node('code', m[8]));
+    else parent.append(node('strong', m[10]));
+    at = re.lastIndex;
+  }
+  parent.append(document.createTextNode(text.slice(at)));
+}
+function markdown(parent, text) {
+  const lines = String(text || '').split('\n');
+  let code = null, paragraph = [];
+  const flush = () => { if (paragraph.length) { const p = node('p'); inline(p, paragraph.join('\n')); parent.append(p); paragraph = []; } };
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) {
+      flush(); if (code) { parent.append(node('pre', code.join('\n'))); code = null; }
+      else code = [];
+    } else if (code) code.push(line);
+    else if (/^\s*$/.test(line)) flush();
+    else if (/^#{1,4}\s+/.test(line)) { flush(); const h = line.match(/^(#{1,4})\s+(.*)/); const el = node(`h${Math.min(4, h[1].length + 1)}`); inline(el, h[2]); parent.append(el); }
+    else if (/^>\s?/.test(line)) { flush(); const b = node('blockquote'); inline(b, line.replace(/^>\s?/, '')); parent.append(b); }
+    else paragraph.push(line);
+  }
+  flush(); if (code) parent.append(node('pre', code.join('\n')));
+}
+function showItem(it, images) {
+  if (it.kind === 'restart') return;
+  const row = node('section', null, `entry ${it.kind || ''}`), top = node('div', null, 'meta');
+  const names = {user:'用户',text:'回复',thinking:'思考',tool:'工具调用',result:'工具结果',system:'系统消息',duration:'用时',command:'命令',notice:'提示',attachment:'附件',task:'后台任务',meta:'附加信息',error:'错误'};
+  top.append(node('b', names[it.kind] || it.kind || '记录'));
+  if (it.name) top.append(node('span', it.name));
+  if (it.ts) { const d = new Date(it.ts); if (!isNaN(d)) top.append(node('time', d.toLocaleString('zh-CN'))); }
+  row.append(top);
+  if (it.text) markdown(row, it.text);
+  if (it.kind === 'tool' && it.input != null) { const d = node('details'); d.append(node('summary', '查看工具参数')); d.append(node('pre', JSON.stringify(it.input, null, 2))); row.append(d); }
+  if (it.kind === 'command' && it.tags) row.append(node('pre', JSON.stringify(it.tags, null, 2)));
+  if (it.image && images[it.image]) { const img = node('img'); img.src = `${base}/image/${images[it.image]}`; img.alt = '对话中上传的图片'; row.append(img); }
+  for (const im of it.images || []) {
+    if (im.key && images[im.key]) { const img = node('img'); img.src = `${base}/image/${images[im.key]}`; img.alt = '工具结果中的图片'; row.append(img); }
+    else if (im.why) row.append(node('p', `图片无法读取：${im.why}`, 'error'));
+  }
+  if (row.children.length > 1) content.append(row);
+}
+(async () => {
+  try {
+    const res = await fetch(`${base}/data`, {credentials:'omit', cache:'no-store'});
+    if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || `读取失败（${res.status}）`); }
+    const data = await res.json();
+    const title = data.title || '分享的会话'; document.title = `${title} · 分享的会话`; document.getElementById('title').textContent = title;
+    window._files = Object.fromEntries(Object.entries(data.files || {}).map(([k,v]) => [v,k]));
+    for (const it of data.items || []) showItem(it, data.images || {});
+    document.getElementById('state').textContent = data.items?.length ? '' : '此会话暂无内容';
+  } catch (e) { const s = document.getElementById('state'); s.className = 'error'; s.textContent = `无法打开会话：${e.message}`; }
+})();
+</script>
+</body>
+</html>
