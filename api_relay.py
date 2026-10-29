@@ -165,7 +165,7 @@ async def connect(host: str, port: int | None, link):
 
 def model_body(account: str, body: bytes) -> tuple[bytes, str]:
     """平台渠道名只映射 model，不改消息内容，也不退到普通渠道。返回（发出的正文，这个模型实际用哪把钥匙的号）：
-    同一站可以有几把令牌（IKun 的 cc-kiro 和 gemini 分组，2026-10-30 起），model_keys 把模型指到拿另一把钥匙的号上
+    同一站可以有几把令牌（比如同一个中转站里不同的分组），model_keys 把模型指到拿另一把钥匙的号上
     （那个号用 present_as 并进这个号，见 instance），钥匙、渠道映射和缓存价目都按那个号的来，界面上仍是一家。"""
     from instance import API, api_models
     if not is_relay(account):
@@ -320,7 +320,7 @@ def refuse_remote(account: str):
 
 
 def relay_balance(account: str, v: dict, token_file, port: int) -> dict:
-    """new-api 系中转站的账号余额（2026-10-29 起，主人给了空悲切的账号访问令牌）：API 密钥查不了账号信息，要访问令牌，
+    """new-api 系中转站的账号余额：API 密钥查不了账号信息，要访问令牌，
     放在 ~/.config/cc_viewer/<号>.token（0600，不放配置里，有这个文件才算接了）。金额换算照对账那套 /api/status 的参数核
     （platform_costs.conversion，参数变了就报错不算）。只读，不消耗额度。"""
     try:
@@ -345,7 +345,7 @@ def relay_balance(account: str, v: dict, token_file, port: int) -> dict:
     try:
         # 两个接口都回 {"success": true, "data": …}，只认 success 的那份（和对账的 _get 同一个规矩）
         status = _data(get("/api/status"))
-        # 金额显示参数：空悲切按人民币、SISUO 按美元（一元对一美元，主人定的：界面照数显示，不折算）。
+        # 金额显示参数：有的站按人民币、有的按美元（一元对一美元：界面照数显示，不折算）。
         # 只认核对过的这两套参数，别的报错不算，不拿没核对的汇率硬算
         display, per_unit = status.get("quota_display_type"), status.get("quota_per_unit")
         if display not in ("CNY", "USD") or float(per_unit) != 500000 or float(status.get("usd_exchange_rate")) != 1:

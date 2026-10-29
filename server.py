@@ -1412,7 +1412,7 @@ def web_ranked(me: Who, paid_ok: bool, environment: str | None, family: str = "c
 
 def plain_sub(account: str) -> bool:
     """共用的 Claude 订阅号（ccNN 这类，连同它的API回环入口）：不是 GPT 号，也不是按 token 付费的 API 号、中转站。
-    个人默认账号只有号主能固定成这种号（set_settings，2026-10-29 主人说的），前端设置页的下拉同一个规矩"""
+    个人默认账号只有号主能固定成这种号（set_settings），前端设置页的下拉同一个规矩"""
     b = base_account(account)
     return account_family(b) == "claude" and b not in API
 
@@ -1515,7 +1515,7 @@ def get_settings(me: Who = Depends(who)):
             "fallback": web_account(config.account), "canGlobal": me.admin}
 
 
-ACG_SPENT_FEN = 50   # 累计花掉超过 5 毛的人，二次元没切过就开着（2026-10-29 主人说的）
+ACG_SPENT_FEN = 50   # 累计花掉超过 5 毛的人，二次元没切过就开着
 
 
 def used_features(name: str) -> dict:
@@ -1608,7 +1608,7 @@ def set_settings(body: SettingsBody, me: Who = Depends(who)):
         raise HTTPException(400, f"{want} 不能设为默认账号：{BANNED.get(want, '账号不存在')}")
     if want and want != AUTO and EXPIRES.get(base_account(want), math.inf) < time.time():
         raise HTTPException(400, f"{want} 不能设为默认账号：订阅已到期")
-    # 个人默认账号不能固定成共用的 Claude 订阅号（2026-10-29 主人说的）：大家共用的号额度此起彼伏，固定了反而常常挤在用满的号上，
+    # 个人默认账号不能固定成共用的 Claude 订阅号：大家共用的号额度此起彼伏，固定了反而常常挤在用满的号上，
     # 选「自动」会挑此刻最宽裕的；自己是号主的号除外。已经设了的不动（选择是用户的数据），只是不能再新设
     if body.scope == "mine" and want and want != AUTO and plain_sub(want) and not owns(me.name, want) \
             and want != users.user_default(me):
@@ -1996,7 +1996,7 @@ def summary_tail(path: Path) -> tuple[str, str, str] | None:
 
 
 def summary_candidates(now: float) -> list[dict]:
-    """该写摘要的会话（在线程里跑）：主人在名单里（summaries.USERS）、不是工作流和独立环境、上一次调用结束正好过了 45 分钟，
+    """该写摘要的会话（在线程里跑）：会话主人在名单里（summaries.USERS）、不是工作流和独立环境、上一次调用结束正好过了 45 分钟，
     号是做的那几家、和会话现在选的号和模型一样，上下文和调用次数比上次触发多出够多。"""
     if summaries.broken or config.readonly:
         return []
@@ -2033,7 +2033,7 @@ def summary_candidates(now: float) -> list[dict]:
             tab = tabs.get(tid)
             now_account = tab.account if tab else accounts.get(tid)
             if now_account and base_account(now_account) != base_account(account):
-                continue   # 换过号：缓存在原来的号上，主人说不切号才做
+                continue   # 换过号：缓存在原来的号上，不切号才做
             if tab and tab.model and tab.model.split("[")[0] != model.split("[")[0]:
                 continue   # 网页上换过模型
             if not summaries.due(sid, ctx, len(main)):
@@ -2131,7 +2131,7 @@ async def summary_run(c: dict):
         text = result.get("result") or ""
         try:
             summary = summaries.parse(text)
-        except ValueError as e:   # 回复开头一起记下：10-29 第一次没写成时只记了「没有长摘要」，查不出是什么回复
+        except ValueError as e:   # 回复开头一起记下：只记「没有长摘要」的话查不出是什么回复
             raise RuntimeError(f"{e}（回复开头：{text[:200] or '空的'}）") from None
     except Exception as e:
         why = str(getattr(e, "detail", e))
@@ -3922,7 +3922,7 @@ async def spend_map(tid: str, me: Who = Depends(who)):
     return with_seq(tree, tab.session.seq_of)
 
 
-# ---------- 审稿看板（2026-10-29 起，见 review_board.py）：自动审稿的会话点开的整页面板，只读 ----------
+# ---------- 审稿看板（见 review_board.py）：自动审稿的会话点开的整页面板，只读 ----------
 
 def review_ws(tab: Tab, ws: str) -> str | None:
     """看哪个工作区：只认这个会话的 review.py 打印过的（reviewWs），不给就是最近那个；一个都没有是 None"""
@@ -4463,7 +4463,7 @@ def spend_fields(path: Path, since: float | None = None, snap: calls.Snapshot | 
     """会话标题前的总消耗：spent 全部、spentPaid 用户付的金额（含远端已结算的展示），spentBlue 由预定付掉的（见 users.spending），
     前端换算成点数，免费号的、照常扣钱的、预定付掉的各用各的颜色写。since、snap 见 users.spending。"""
     sp = users._sum_rows(users.api_rows(path.stem, since)) if str(path).startswith("api-session/") else users.spending(path, since, snap)
-    # 从这个会话派出去的工作流任务（ccagent、ccrun、包装 SDK）也算进来：子代理是它的工具，花的钱该显示在它头上（2026-10-29 主人说的）。
+    # 从这个会话派出去的工作流任务（ccagent、ccrun、包装 SDK）也算进来：子代理是它的工具，花的钱该显示在它头上。
     # 只加在展示上，账本照旧按各自的会话记一次；任务会话本身不出现在会话列表里，不会被算两遍
     if not str(path).startswith("api-session/") and Path(path).parent.name != "subagents":
         for kid in workflows.runs_of(Path(path).stem):
@@ -4887,7 +4887,7 @@ def persona_delete(cid: str, me: Who = Depends(who)):
     return {"name": persona_call(personas.delete, me.name, cid)}
 
 
-# ---------- 待办（2026-10-29 起，下午改成清单入口，见 todos.py）：侧边栏「待办」页列出登记的清单文件、快速新建、改几样（攒成操作，AI 下次读清单时写进文件）、勾选几条发到新会话 ----------
+# ---------- 待办（清单入口，见 todos.py）：侧边栏「待办」页列出登记的清单文件、快速新建、改几样（攒成操作，AI 下次读清单时写进文件）、勾选几条发到新会话 ----------
 
 def todo_call(fn, *args, **kw):
     try:
@@ -4970,7 +4970,7 @@ def todo_view(me: Who) -> dict:
             todo_call(todos.drop_session, user, sid, "会话已删除")
             book = todo_call(todos.overview, user)
     items = [{**{k: v for k, v in it.items() if k != "log"}, "links": todos.links(it)} for it in book["items"].values()]
-    # lists：登记的几份清单（在哪、哪份默认、读不出来或格式不对的原因）；pending：网页上攒着、还没写进文件的操作有几条（2026-10-29 改版，todos.py 开头）
+    # lists：登记的几份清单（在哪、哪份默认、读不出来或格式不对的原因）；pending：网页上攒着、还没写进文件的操作有几条（见 todos.py 开头）
     return {"groups": book["groups"], "items": items, "sessions": cards, "lists": book.get("lists", []), "pending": book.get("pending", 0),
             "max": {"title": todos.MAX_TITLE, "group": todos.MAX_GROUP, "summary": todos.MAX_SUMMARY}}
 
@@ -5074,7 +5074,7 @@ def my_ledger(me: Who = Depends(who)):
     return with_titles(users.ledger(me.name))
 
 
-# ---------- 账号页的几张图（stats.py，2026-10-29 主人加的；前端 js/stats.js）----------
+# ---------- 账号页的几张图（stats.py，前端 js/stats.js）----------
 
 @app.get("/api/balance-history")
 def balance_history(days: float = 30, me: Who = Depends(who)):

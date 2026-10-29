@@ -309,7 +309,7 @@ def _summary_rows(kinds):
     return out
 
 
-# ---- 会话的概况（会话条件和每组抬头用，2026-10-30 主人要的）----
+# ---- 会话的概况（会话条件和每组抬头用）----
 # 新建、最后一条、气泡数从正文索引现数（索引就在手里，数一遍很快）；工作目录、上下文、花费要读原文件或调用表，
 # 记在 recall_index/meta.json 里：工作目录按会话编号记一次就够（不会变），上下文和花费按会话和子代理文件的大小记，大小变了才重算。
 TS_W = re.compile(rb'^\{"t": "([^"]*)", "w": "([ua])"', re.M)
@@ -429,7 +429,7 @@ def here_grep(inst, a):
         files = [f for f in files if users.owner_of(f[1]) == a.only]
     st, pending = _update_index(inst, files, START + 6.5)
     d = _index_dir()
-    # 原文件已经不在的会话（Claude Code 按 cleanupPeriodDays 把超过 30 天的会话记录删了，2026-10-29 发现）：
+    # 原文件已经不在的会话（Claude Code 按 cleanupPeriodDays 把超过 30 天的会话记录删了）：
     # 索引里的正文还在，照样搜。按会话编号认，同一个会话换了位置的不重复算；修改时间当成无穷大，--from 不会把它筛掉
     have = {f[1] for f in files}
     for path, rec in st.items():
@@ -506,12 +506,12 @@ def here_grep(inst, a):
         for raw in sel:
             found.append((sid, raw))
             per[sid] = per.get(sid, 0) + 1
-    # 每个会话最新的摘要也算气泡（2026-10-29 主人说的）；要哪类由 -s、--long-summary 定，和 -u、-a 是「或」（2026-10-30 主人说的）
+    # 每个会话最新的摘要也算气泡；要哪类由 -s、--long-summary 定，和 -u、-a 是「或」
     if want & {"s", "l"}:
         for sid, raw in _summary_rows(want):
             e = json.loads(raw)
             if sid not in where or (lo_s and e["t"] < lo_s) or (hi_s and e["t"] >= hi_s) or (word and word not in e["x"]):
-                continue   # 不在 where 里的是没过编号、主人、时间这些前置条件的
+                continue   # 不在 where 里的是没过编号、会话主人、时间这些前置条件的
             if info[sid]["bad"]:
                 continue
             found.append((sid, raw))
@@ -662,7 +662,7 @@ def main():
     ap.add_argument("--tail", type=int, default=None, help="每个会话只要符合条件的最后 N 条（摘要不占名额）")
     ap.add_argument("--per", type=int, default=None, help="每个会话最多给几条，多了在这个会话里均匀抽（摘要不占名额）")
     ap.add_argument("--cut", type=int, default=None, help="每条给多少字：给了词默认 100，没给词默认 200，0 是全文")
-    # 会话条件：整个会话符合才要它的气泡（2026-10-30 主人要的）
+    # 会话条件：整个会话符合才要它的气泡
     ap.add_argument("--cwd", default="", help="工作目录里含这几个字的会话")
     ap.add_argument("--born-from", default="", help="新建（第一条气泡）在这个时刻以后的会话")
     ap.add_argument("--born-to", default="", help="新建在这个时刻以前的会话（含那一分钟或那一天）")
@@ -675,7 +675,7 @@ def main():
     ap.add_argument("--max-ctx", type=float, default=None, help="现在的上下文至多这么多 K token 的会话")
     ap.add_argument("--min-cost", type=float, default=None, help="一共花了至少这么多元的会话")
     ap.add_argument("--max-cost", type=float, default=None, help="一共花了至多这么多元的会话")
-    # 气泡的类别：写了几类就要这几类的「或」，一类都不写是用户、助手和短摘要（2026-10-30 主人说的，原先 -u、-a 互斥、要了就没有摘要）
+    # 气泡的类别：写了几类就要这几类的「或」，一类都不写是用户、助手和短摘要
     ap.add_argument("--user", "-u", action="store_true", help="要用户（人）说的话")
     ap.add_argument("--assistant", "-a", action="store_true", help="要助手说的话")
     ap.add_argument("--summary", "-s", action="store_true", help="要会话的 100 字短摘要")
@@ -736,7 +736,7 @@ def main():
     for i in random.sample(range(total), min(limit, total)):
         take[bisect.bisect_right(ends, i)] += 1
     picked = [e for k, rows in zip(take, shown) for e in rows[:k]]
-    # 按会话分组、组里照旧按时间从旧到新；会话之间没有该排的先后，每次随机排（2026-10-29 主人说的）
+    # 按会话分组、组里照旧按时间从旧到新；会话之间没有该排的先后，每次随机排
     groups = {}
     for e in sorted(picked, key=lambda e: e["ts"]):
         groups.setdefault(e["sid"], []).append(e)

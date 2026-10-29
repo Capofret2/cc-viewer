@@ -57,7 +57,7 @@ def _get(account, path, authenticated=False):
         conn = http.client.HTTPSConnection(host, 443, timeout=5, context=ssl.create_default_context())
     headers = {'Accept': 'application/json', 'Connection': 'close'}
     if authenticated:
-        # 只用这把钥匙查它自己的消费；IKunCode 的日志接口不认账号访问令牌（2026-10-30 实测 401），
+        # 只用这把钥匙查它自己的消费；IKunCode 的日志接口不认账号访问令牌（实测 401），
         # 同站第二把令牌（model_keys 并号）的消费拉不到实扣，按配置单价预估
         headers['Authorization'] = 'Bearer ' + api_relay.key(account)
     try:
@@ -211,7 +211,7 @@ def sync(account):
             if not isinstance(data, list):
                 raise CostError('平台令牌日志接口不再返回列表，未更新缓存')
             records = [normalize(row, unit) for row in data]
-            # 同一个请求编号这批里可能出现多条记录（2026-10-29 空悲切把同一个编号的错误记了两条，站内重试成功又和失败共用编号）。
+            # 同一个请求编号这批里可能出现多条记录（有的站把同一个编号的错误记了两条，站内重试成功又和失败共用编号）。
             # 内容一样的只留一条；内容不同的按内容把键分岔——键完全由这行的内容决定，下次拉取算出的还是它，照样不会重复入账。
             # 以前按裸编号存下的那行（这批里它分岔了）先删掉，由分岔后的键原样接上，不留双份。
             groups: dict[str, list[dict]] = {}
@@ -429,7 +429,7 @@ def quote(mid, account, model, use):
 
 async def poll():
     import remote_costs
-    # 同一站有几把钥匙（并号）就轮流查、每轮只查一把：同 IP 每分钟几次会被平台限流（2026-10-30 IKun 实测两把各拉一次就 429）
+    # 同一站有几把钥匙（并号）就轮流查、每轮只查一把：同 IP 每分钟几次会被平台限流（实测两把各每分钟拉一次就 429）
     turn: dict[str, int] = {}
     while True:
         sites: dict[str, list[str]] = {}

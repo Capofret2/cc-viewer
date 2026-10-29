@@ -35,7 +35,7 @@ NEED = {
     "sdk_client/ccviewer_sdk": "rx",
     "sdk_client/ccviewer_sdk/__init__.py": "r",
     "sdk_client/ccviewer_sdk/_client.py": "r",
-    # 会话记录存档（2026-10-29）：ccguest 的 crontab 每 10 分钟以 python3 -I 跑它，读不到就停了存档、只在它的 archive.log 里报错
+    # 会话记录存档：运行 Claude 的用户的 crontab 每 10 分钟以 python3 -I 跑它，读不到就停了存档、只在它的 archive.log 里报错
     "archive_transcripts.py": "r",
 }
 

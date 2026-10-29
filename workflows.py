@@ -48,7 +48,7 @@ SDK_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY", "ENABLE_CLAUDEAI_MCP_SERVERS", "CL
            "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "MAX_THINKING_TOKENS", "CLAUDE_AGENT_SDK_CLIENT_APP"}
 SDK_SETTINGS = {"autoMemoryEnabled", "disableClaudeAiConnectors"}
 SDK_EXTRA = {"disable-slash-commands"}
-# bypassPermissions 2026-10-29 起放开（ccagent --bypass）：派出去的子代理是主代理的工具，由主代理负责，和 Claude Code 自带的子代理一样能全开
+# bypassPermissions 放开（ccagent --bypass）：派出去的子代理是主代理的工具，由主代理负责，和 Claude Code 自带的子代理一样能全开
 SDK_MODES = {"default", "dontAsk", "acceptEdits", "bypassPermissions"}
 TOOLS_PRESET = {"type": "preset", "preset": "claude_code"}   # 工具写成这个就是 Claude Code 默认的全套工具
 SDK_FIELDS = {"system_prompt", "tools", "allowed_tools", "disallowed_tools", "setting_sources", "skills", "mcp_servers",
@@ -66,8 +66,8 @@ _kids = (0, 0.0, {})   # (登记的会话数, 建的时刻, 发起会话 → 它
 
 
 def runs_of(parent):
-    """从这个会话派出去的工作流任务（各自的会话编号）。会话的花费要把它们算进来（server.spend_fields，2026-10-29 主人说的）。
-    登记一份任务时先记主人、再补 workflow，会话数变了或者过了十秒就重建，不会一直漏掉刚补上的"""
+    """从这个会话派出去的工作流任务（各自的会话编号）。会话的花费要把它们算进来（server.spend_fields）。
+    登记一份任务时先记会话主人、再补 workflow，会话数变了或者过了十秒就重建，不会一直漏掉刚补上的"""
     global _kids
     n, at, kids = _kids
     if n != len(users.owners) or time.monotonic() - at > 10:
@@ -134,7 +134,7 @@ def check_sdk(raw):
             or sp.get("type") == "preset" and sp.get("preset") == "claude_code" and isinstance(sp.get("append", ""), str))):
         raise ValueError("system_prompt 只支持文字、custom 或 claude_code 预设（不支持从文件读）")
     tools = o.get("tools")
-    # 工具名不再只限 Read、Edit、Write（2026-10-29）：子代理是调用方的工具，用什么由调用方定、由调用方负责；
+    # 工具名不只限 Read、Edit、Write：子代理是调用方的工具，用什么由调用方定、由调用方负责；
     # 仍要明写，不写时 Claude Code 默认全开，写成 claude_code 预设才是全开
     if tools != TOOLS_PRESET and (not isinstance(tools, list) or not all(isinstance(t, str) for t in tools)):
         raise ValueError("请明写 tools（不用工具就写 []，全套工具写 {\"type\": \"preset\", \"preset\": \"claude_code\"}）："

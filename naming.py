@@ -28,7 +28,7 @@ from instance import DATA
 FILE = DATA / "session_names.json"
 MAX_WIDTH = 12                          # 半角个数：6 个汉字，或者 12 个字母、数字
 NUDGE_CTX, NUDGE_USER, NUDGE_TOOLS = 100_000, 3, 10
-# 起名提醒先关掉（2026-10-29 主人说的：以后由会话摘要顺带起名，摘要在后台分叉出去写，不进对话，见 README 待办「会话摘要」）。
+# 起名提醒先关掉（以后由会话摘要顺带起名，摘要在后台分叉出去写，不进对话）。
 # 条件和写法都留着，打开改回 True 就行；AI 自己用 ccname 起名照旧能用
 NUDGE_ON = False
 
@@ -121,7 +121,7 @@ def handle(req: dict, sid: str) -> str:
 
 
 def propose(sid: str, name: str) -> str:
-    """会话摘要顺带起的名字（summaries.py，2026-10-29）：用户起的不覆盖，AI 起的可以换，和 ccname 不加 --force 一样记成待写。
+    """会话摘要顺带起的名字（summaries.py）：用户起的不覆盖，AI 起的可以换，和 ccname 不加 --force 一样记成待写。
     返回没起成的原因，起成了（或已经是这个名字）是空字符串。"""
     if broken:
         return broken

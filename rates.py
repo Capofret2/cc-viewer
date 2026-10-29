@@ -25,7 +25,7 @@ GPT_PRICE = 0.3
 # 表里的元乘 YUAN 换成点，收钱时再乘 PRICE，界面上写的分（× FEN）正好是官方价 × 100
 FEN = 5
 YUAN = 100 / FEN / PRICE
-# 空悲切的固定 Opus 5.5 渠道回包出现过点号写法；只共用已配置的账号价，不改变请求或原始模型名。
+# 有的中转站的 Opus 5.5 渠道回包出现过点号写法；只共用已配置的账号价，不改变请求或原始模型名。
 RESPONSE_PRICE_ALIASES = {'blanka': {'claude-opus-5.5': 'claude-opus-5-5'}}
 
 
@@ -36,7 +36,7 @@ def api_price(account, model):
     return config.get('rates', {}).get(priced)
 
 
-# 长上下文分档（2026-10-29 起，空悲切的 GPT-6 Astra）：号的单价里多写一段 "long": {"over": 门槛, in, out, cr, cw, 有一小时价再写 cw1h}，
+# 长上下文分档（比如中转站的 GPT-6 Astra）：号的单价里多写一段 "long": {"over": 门槛, in, out, cr, cw, 有一小时价再写 cw1h}，
 # 一次调用的完整输入（未命中输入 + 缓存写入 + 缓存命中）超过门槛，这一整笔都按长档的单价算，和平台「完整输入长度 ≤ 272K 为 standard」一致。
 # 门槛按 token 个数写（272K 写 272000，平台没说 K 是 1000 还是 1024，按 1000 算）
 def whole_input(use) -> int:
@@ -65,8 +65,8 @@ def _check_long(account, model, row):
 
 
 def sub_gpt(key: str) -> bool:
-    """按订阅 GPT 号的口径计价的 GPT 模型（额度换算、收钱再打 GPT_PRICE 的折）。号自己配了价的（中转站的 gpt-6-astra@account=api2，
-    2026-10-29 起）按平台标价收，不吃这个折。"""
+    """按订阅 GPT 号的口径计价的 GPT 模型（额度换算、收钱再打 GPT_PRICE 的折）。号自己配了价的（比如中转站的 gpt-6-astra@account=某号）
+    按平台标价收，不吃这个折。"""
     return is_gpt_model(key) and "@account=" not in key
 
 

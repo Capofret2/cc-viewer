@@ -344,7 +344,7 @@ for _a, _g in API.items():
     if _missing := [m for m in _r["models"] if m.split("[")[0] not in (_g.get("rates") or {})]:
         raise ValueError(f"{_a} 的 rates 里没有 {'、'.join(_missing)} 的单价")
     RELAY[_a] = {k: _r[k] for k in ("name", "host", "prefix", "models", "labels")}
-# 同一站的第二把令牌（2026-10-30 起，IKun 的 gemini 分组）：站内分组隔开模型目录，一把钥匙进不了两个组，只能一站两个号。
+# 同一站的第二把令牌（比如同一个中转站里不同的分组）：站内分组隔开模型目录，一把钥匙进不了两个组，只能一站两个号。
 # present_as 把并进来的号藏到主号名下（选号列表、账号面板都不列），主号的 model_keys 把某些模型指到拿另一把钥匙的号上，
 # 闸门按模型换钥匙（api_relay.model_body），计价、对账、统计都只认发起的那个号，用户看到的始终是一家。
 PRESENT_AS: dict[str, str] = {a: g["present_as"] for a, g in API.items() if g.get("present_as")}
