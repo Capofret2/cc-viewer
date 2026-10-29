@@ -26,14 +26,13 @@ GPT_PRICE = 0.3
 FEN = 5
 YUAN = 100 / FEN / PRICE
 # 有的中转站的 Opus 5.5 渠道回包出现过点号写法；只共用已配置的账号价，不改变请求或原始模型名。
-# 按中转站的 vendor 写：{'某站': {'claude-opus-5.5': 'claude-opus-5-5'}}，回包里的左边按右边的单价算
-RESPONSE_PRICE_ALIASES: dict[str, dict[str, str]] = {}
+# 写在这个号的配置里（instance.json 的 api 里那个号）："price_aliases": {"claude-opus-5.5": "claude-opus-5-5"}，回包里的左边按右边的单价算
 
 
 def api_price(account, model):
     config = API.get(account, {})
     bare = (model or '').split('@account=')[0].split('[')[0]
-    priced = RESPONSE_PRICE_ALIASES.get(config.get('vendor'), {}).get(bare, bare)
+    priced = config.get('price_aliases', {}).get(bare, bare)
     return config.get('rates', {}).get(priced)
 
 
@@ -101,7 +100,7 @@ def load(price: bool = False) -> dict[str, dict]:
                                                    if long else {}),
                                                 'yuan': YUAN,
                                                 **({"estimate_only": 1} if config.get("cost_audit") else {})}
-        for alias, model in RESPONSE_PRICE_ALIASES.get(config.get('vendor'), {}).items():
+        for alias, model in config.get('price_aliases', {}).items():
             if model in config.get('rates', {}):
                 out[f'{alias}@account={account}'] = dict(out[billing_model(model, account)])
     # 智谱等原生 API 模型也能按远端实扣展示；换算只作用于金额，不再按峰谷乘一遍。

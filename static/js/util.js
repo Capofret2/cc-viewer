@@ -2,8 +2,9 @@
 const { ref, reactive, watch } = Vue;
 
 // 界面上怎么称呼用这个查看器的人（气泡、刻度预览、找话、导出里的那个名字）。
-// 每个实例在服务器配置里自己定（/api/config 的 call），默认是「用户」；取到配置前也先用它
-export const who = reactive({ me: '用户' });
+// 每个实例在服务器配置里自己定（/api/config 的 call），默认是「用户」；取到配置前也先用它。
+// host 是查看器所在的机器在界面上的叫法（host），pcSetupUrl 是装卸电脑脚本对外的地址（pcSetupUrl，空就用当时打开页面的地址），都见 instance.py
+export const who = reactive({ me: '用户', host: '服务器', pcSetupUrl: '' });
 
 // 现在是谁在用（见 users.py、users.js）：name 为 null 是游客；单用户实例（multi 为 false）里一直是那一个人。
 // loaded 之前、或者没取到（error）时不知道是谁，不能当成游客

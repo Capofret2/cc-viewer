@@ -41,8 +41,12 @@ if [ -n "${CC_VIEWER_REMOTE:-}" ]; then
     exec claude "$@"
 fi
 cmd=${BASH_ALIASES[$CC_ALIAS]:-}
-# ~/.bashrc 里没有同名的别名：直接运行 claude，配置目录由查看器经 CLAUDE_CONFIG_DIR 给
-[ -n "$cmd" ] || exec claude "$@"
+# ~/.bashrc 里没有同名的别名：直接运行 claude，配置目录由查看器经 CLAUDE_CONFIG_DIR 给；
+# instance.json 写了 alias_only（CC_VIEWER_ALIAS_ONLY）就拒绝启动：别名里管着代理和账号，不能绕过去
+if [ -z "$cmd" ]; then
+    [ -z "${CC_VIEWER_ALIAS_ONLY:-}" ] || { echo "~/.bashrc 里没有 ${CC_ALIAS:-（没指定）} 这个别名，这个实例只准经别名启动" >&2; exit 127; }
+    exec claude "$@"
+fi
 if [ -n "$CC_VIEWER_GATE" ]; then
     # GPT 号（别名把 ANTHROPIC_BASE_URL 指到本机的翻译层 127.0.0.1）：127.0.0.1 在 no_proxy 里，CLI 会直连、绕过闸门。
     # 换成闸门认得的名字 gpt-bridge.cc-viewer，去翻译层的请求就经闸门走，拦下时一样拦得住（见 gate.py）；

@@ -75,7 +75,7 @@ from instance import API_ENTRIES, WEB_ENTRIES, REMOTE, REMOTE_GPT, base_account,
 import peak   # 按时段计价的模型此刻是高峰还是空闲
 from users import Who
 from datetime import datetime, timedelta
-from instance import CALL, DATA, FIVE_IN_WEEK, PAID, PROXIES, SHARE_URL   # 运行时小文件一律写在 DATA（见 instance.py），代码目录只放代码和前端
+from instance import CALL, DATA, HOST_NAME, PC_SETUP_URL, XXLB, FIVE_IN_WEEK, PAID, PROXIES, SHARE_URL   # 运行时小文件一律写在 DATA（见 instance.py），代码目录只放代码和前端
 from instance import GPT, GPT_MODELS, WEEK_ONLY, five_in_week, is_gpt_model   # GPT 号（经本机翻译层用 ChatGPT 订阅的 Claude Code）
 # API 号（DeepSeek，按 token 付费，请求经闸门补上密钥，见 api_relay.py）；模型分几家，号只能用自家的
 from instance import API, API_MODELS, PRESENT_AS, RELAY, account_family, api_models, model_family
@@ -1097,9 +1097,10 @@ async def lifespan(_):
         import chat
         try:
             await gate.start(config.gate_port)
-            from instance import DEFAULT_PROXY_PORT
+            from instance import DEFAULT_PROXY_PORT, PROXY_TABLE
             print(f"网络闸门在 127.0.0.1:{config.gate_port}，"
-                  + (f"经本机代理 127.0.0.1:{DEFAULT_PROXY_PORT} 出网" if DEFAULT_PROXY_PORT else "直连出网"), flush=True)
+                  + (f"按号转给各自的代理端口（{PROXY_TABLE}，没写的号走 {DEFAULT_PROXY_PORT}）" if PROXY_TABLE
+                     else f"经本机代理 127.0.0.1:{DEFAULT_PROXY_PORT} 出网" if DEFAULT_PROXY_PORT else "直连出网"), flush=True)
         except OSError as e:
             print(f"网络闸门起不来（端口 {config.gate_port}：{e}），网页对话拉不起 Claude，换个 --gate-port 重启", flush=True)
         import sshgw   # ssh 门卫：配了 gw_socket 才开（见 sshgw.py）
@@ -1272,6 +1273,8 @@ class NewTab(BaseModel):
 def get_config():
     exposed = set(api_gateway.allowed_accounts()) if api_gateway.enabled() and not config.readonly else set()
     return {"root": config.root, "readonly": config.readonly, "account": default_account()[0], "call": CALL,
+            # host：机器在界面上的叫法；xxlb：部署者放好了看板娘的模型；pcSetupUrl：装卸电脑脚本对外的地址（都见 instance.py）
+            "host": HOST_NAME, "xxlb": XXLB, "pcSetupUrl": PC_SETUP_URL,
             # proxy 是手工登记的代理端口和节点地区（见 instance.py），没登记的给 null
             # effort：这个号设置里写的思考强度，会话没选过强度时就用它（见 settings_effort）
             # gpt：是不是 GPT 号（模型下拉换成 GPT 的模型，auto 权限模式在它上面按 dontAsk 跑，见 run_mode）

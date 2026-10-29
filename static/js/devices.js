@@ -4,7 +4,7 @@
 // 哪里解决不了，点「请 Claude 排查」开一个新对话，把链接和出错的原话写进输入框交给 Claude。
 // Claude 在对话里给的 #dev=<链接名字> 链接点开就是同一个添加窗口。只在开了 ssh 门卫的实例、登录以后有（me.devices）
 const { reactive, computed } = Vue;
-import { api, me, say, copyText, ago } from './util.js';
+import { api, me, say, copyText, ago, who } from './util.js';
 
 export const OS_LABEL = { windows: 'Windows', mac: 'Mac', linux: 'Linux' };
 const STEPS = ['运行命令', '安装 SSH 服务', '允许 Claude 登录', '登记这台电脑', '建立连接'];
@@ -209,10 +209,11 @@ export function useDevices({ askClaude, meReady }) {
     } catch (e) { dev.msg[d.name] = { ok: false, text: `删除失败：${e.message}` }; }
   });
   // 电脑离线、没卸掉时，用户自己在那台电脑上卸用的命令（和安装命令一个样子）：卸载脚本由查看器自己发（/pc-setup/uninstall.*），
-  // 地址用浏览器当时打开查看器的地址，那台电脑要访问得到它
+  // 地址用实例配置的对外地址（instance.json 的 pc_setup_url），没配就用浏览器当时打开查看器的地址，那台电脑要访问得到它
+  const base = () => who.pcSetupUrl || location.origin;
   const UNINSTALL = {
-    windows: `[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm ${location.origin}/pc-setup/uninstall.ps1 | iex`,
-    unix: `bash -c "$(curl -fsSL ${location.origin}/pc-setup/uninstall.sh || wget -qO- ${location.origin}/pc-setup/uninstall.sh)"`,
+    get windows() { return `[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm ${base()}/pc-setup/uninstall.ps1 | iex`; },
+    get unix() { return `bash -c "$(curl -fsSL ${base()}/pc-setup/uninstall.sh || wget -qO- ${base()}/pc-setup/uninstall.sh)"`; },
   };
   async function copyUninstall(os) {
     if (await copyText(UNINSTALL[os])) say('已复制，请在该电脑的命令窗口中粘贴运行（Windows 需以管理员身份打开 PowerShell）');
@@ -250,7 +251,7 @@ export function useDevices({ askClaude, meReady }) {
     if (!st) return;
     const step = STEPS[Math.min(st.cur, 4)];
     const what = st.error ? `页面上显示出错了：${st.error}`
-      : linkBad.value ? `电脑接上了，但从服务器登录它没成功：${linkBad.value.why}`
+      : linkBad.value ? `电脑接上了，但从${who.host}登录它没成功：${linkBad.value.why}`
       : st.stuck ? `已经 ${Math.round(st.stuck / 60)} 分钟停在「${step}」没有动静了` : `现在停在「${step}」`;
     closeDevices();
     askClaude(`我在网页的「设备」页添加电脑（安装链接 ${st.tok}），${what}。请帮我看看是怎么回事、该怎么办。`);

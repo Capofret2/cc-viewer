@@ -25,7 +25,7 @@ from pathlib import Path
 import hostfs
 import sshgw
 import users
-from instance import DATA, GW_SOCKET
+from instance import DATA, GW_SOCKET, HOST_NAME
 
 ENABLED = bool(GW_SOCKET)
 T = hostfs.HOME / "tunnels"
@@ -116,13 +116,14 @@ def note_event(tok: str, kind: str, text: str):
 EXPLAIN = [
     (r"administrator permission was not given", "未获得管理员权限：Windows 询问「是否允许此应用对你的设备进行更改」时请点击「是」；"
                                                  "如果要求输入密码，说明当前账号无权管理这台电脑，请使用管理员账号登录 Windows 后重试。"),
-    (r"could not reach the server", "这台电脑连不上查看器所在的服务器（或中转服务器）的 SSH 端口：请确认电脑可以上网；"
+    # 各版安装脚本的说法不一样：「could not reach the server」或者「could not reach <机器> through <中转>」
+    (r"could not reach (the server|\S+ through \S+)", f"这台电脑连不上{HOST_NAME}（或中转服务器）的 SSH 端口：请确认电脑可以上网；"
                                            "部分校园网、公司网会拦截该端口，可更换网络（例如手机热点）后重试。"),
     (r"Remote Login is still off", "这台 Mac 未开启「远程登录」：请在「系统设置 → 通用 → 共享」中开启「远程登录」，然后再次运行命令。"),
     (r"Windows is busy installing", "Windows 正在安装其他程序（通常是系统更新），请等待几分钟后再次运行命令。"),
     (r"has expired|does not exist", "此链接已过期（有效期 60 分钟），请重新点击「添加设备」获取新命令。"),
     (r"already been used for \d+ computers", "此命令已用于安装多台电脑，请重新点击「添加设备」获取新命令。"),
-    (r"did not come up within a minute", "安装已完成，但一分钟内未能连上查看器所在的服务器：通常是网络问题，请确认电脑可以上网后再次运行命令。"),
+    (r"did not come up within a minute", f"安装已完成，但一分钟内未能连上{HOST_NAME}：通常是网络问题，请确认电脑可以上网后再次运行命令。"),
     (r"msiexec exit code", "SSH 服务安装失败：请重启电脑后再次运行命令；如仍失败，请点击「请 Claude 排查」。"),
     (r"no known package manager|ssh client is not installed", "这台电脑缺少必要的系统组件，请点击「请 Claude 排查」。"),
     (r"is not running on port", "SSH 服务未能启动，请点击「请 Claude 排查」。"),
@@ -147,7 +148,7 @@ def describe(e: dict) -> str:
     if src == "gw" and t.startswith("registered\t"):
         kv = _kv(t.split("\t", 1)[1])
         return (f"连通了，在设备列表里叫「{kv.get('name')}」" if kv.get("ok") == "1"
-                else f"隧道接上了，但从查看器所在的服务器登录这台电脑没成功：{_unb64(kv.get('why64', ''))}")
+                else f"隧道接上了，但从{HOST_NAME}登录这台电脑没成功：{_unb64(kv.get('why64', ''))}")
     if src == "pc":
         if t.startswith("start "):
             return f"{OS_NAME.get((t.split() + [''])[1], '')} 电脑上开始安装".lstrip()
@@ -495,8 +496,8 @@ def remove(user: str, name: str, cleanup: bool) -> dict:
             elif cleanup:
                 steps.append({"ok": False, "text": "电脑当前离线，无法卸载其上的组件；之后可在该电脑上运行下方的卸载命令"})
             rc, out, err = hostfs.run(["python3", str(T / "pc-remove.py"), str(port)], timeout=30)
-            steps.append({"ok": rc == 0, "text": "本机上这台电脑的钥匙吊销了，它再也连不上来" if rc == 0 else
-                          f"吊销本机上这台电脑的钥匙失败（退出码 {rc}）：{(err or out).decode(errors='replace').strip()[-300:]}"})
+            steps.append({"ok": rc == 0, "text": f"{HOST_NAME}上这台电脑的钥匙吊销了，它再也连不上来" if rc == 0 else
+                          f"吊销{HOST_NAME}上这台电脑的钥匙失败（退出码 {rc}）：{(err or out).decode(errors='replace').strip()[-300:]}"})
     elif cleanup:
         same = [n for u, n in others if u == user]
         if t.get("key"):

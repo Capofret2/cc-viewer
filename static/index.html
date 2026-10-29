@@ -2123,7 +2123,7 @@
               </div>
               <div class="info-body dev-info">
                 <div class="info-row"><b>{{ d.kind === 'pc' ? '连接方式' : '地址' }}</b><span>{{ d.kind === 'pc'
-                  ? `经中转服务器连回本机（本机端口 ${d.port}）` : `${d.host}，端口 ${d.port}${d.via ? `，经 ${d.via} 跳转` : ''}` }}</span></div>
+                  ? `经中转服务器连到${$who.host}（端口 ${d.port}）` : `${d.host}，端口 ${d.port}${d.via ? `，经 ${d.via} 跳转` : ''}` }}</span></div>
                 <div class="info-row"><b>登录用户</b><span>{{ d.login }}</span></div>
                 <div v-if="d.ts" class="info-row"><b>添加时间</b><span>{{ ago(d.ts) }}{{ addedText(d) }}</span></div>
               </div>

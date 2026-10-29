@@ -31,8 +31,17 @@ async function loadLibs() {
 
 // 这次打开页面时加载失败过：所有新会话页都退回颜文字。
 // 开源版不带小小蓝白的模型和 Live2D 运行库（模型是对方许可给原作者用的，Live2D 运行库是专有许可），所以一开始就当成加载不了：
-// 不去请求这些文件，不弹提示条，设置里也不写出处。自己放好 live2d/xxlb/ 和上面三个运行库以后，把这里改成 false 就能用
+// 不去请求这些文件，不弹提示条，设置里也不写出处。自己放好 live2d/xxlb/ 和上面三个运行库以后，在 instance.json 写 "xxlb": true，
+// 配置到了（/api/config 的 xxlb，sessions.js 交过来）才打开。加载失败过（failed）就不再打开
 const broken = ref(true);
+let failed = false;
+export const setXxlb = on => { broken.value = !on || failed; };
+// 配置可能比新会话页晚到：挂载时还关着，就等开关打开了再开始（画布要等 v-if 渲染出来，所以隔一拍）
+const whenOn = start => {
+  if (!broken.value) { start(); return null; }
+  const stop = Vue.watch(broken, v => { if (!v) { stop(); Vue.nextTick(start); } });
+  return stop;
+};
 
 // 跟着主题换颜色：她原本偏蓝的像素（色相 170～270 度，两头渐变）把色相转到这个主题的色相上，
 // 饱和度乘一个数、再往白色提亮一些，成马卡龙色；太灰、太暗的少提或不提，所以黑色蝴蝶结、描边仍然是深色，金发夹、皮肤、眼睛不在这个色相里、不变。
@@ -217,8 +226,8 @@ export const XxlbLive2d = {
       ctx = stage = model = ticker = ro = io = recolor = size = null;
     };
 
-    onMounted(async () => {
-      if (broken.value) return;
+    const start = async () => {
+      if (gone) return;
       try {
         await loadLibs();
         if (gone) return;
@@ -260,12 +269,15 @@ export const XxlbLive2d = {
       } catch (e) {
         cleanup();
         if (!gone && !broken.value) {
-          broken.value = true;
+          failed = broken.value = true;
           fail('加载看板娘小小蓝白', e);
         }
       }
-    });
+    };
+    let stopWait = null;
+    onMounted(() => { stopWait = whenOn(start); });
     onUnmounted(() => {
+      stopWait?.();
       gone = true;
       cleanup();
     });
@@ -328,7 +340,9 @@ export const XxlbThemes = {
   emits: ['pick'],
   setup() {
     const shots = ref(null);
-    onMounted(() => broken.value || takeShots().then(s => (shots.value = s), e => fail('给主题色那排拍小小蓝白', e)));
+    let stopWait = null;
+    onMounted(() => { stopWait = whenOn(() => takeShots().then(s => (shots.value = s), e => fail('给主题色那排拍小小蓝白', e))); });
+    Vue.onUnmounted(() => stopWait?.());
     return { shots, broken };
   },
   // 选中的那个：会动的叠在静止图上面，加载好（ready）了才把静止图藏起来，换选中时不会空一下

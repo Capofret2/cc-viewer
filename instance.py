@@ -23,6 +23,17 @@
 - 上游代理（必填）：proxy_port 写本机一个 HTTP 代理的端口（比如 7890），查看器拉起的 CLI、刷新额度、查平台余额都经它出网，所有号走同一个。
   没写就拒绝启动，不会悄悄直连。确实要直连，得在 instance.json 里亲手写上 "allow_direct": true（模板里是 false），
   像开服前签 EULA 一样，表示知道直连时服务商会直接看到这台机器的出口地址；打开了也是写了 proxy_port 就照样经代理。
+  号多、要分开走不同代理时，proxy_table 写一张端口表的路径：每行「系统用户 号 端口」，号写 * 是这一组的默认端口，
+  系统用户是 run_as（没写就是跑查看器的用户）。表里有的号走自己的端口，没有的走这一组的默认端口，表里没有默认端口再看 proxy_port。
+  proxy_info 写一份 {"端口": {"tag": 节点名, "region": 地区}} 的 JSON 的路径，账号面板上照它写节点和地区。
+  环境变量 CC_PROXY_TABLE 能临时换一张端口表（测试用）。
+- 机器在界面上的叫法：host_name 写成 "实验室服务器" 这样，界面和报错里提到查看器所在的机器时用它；不写是「服务器」。
+- 只准经别名启动：alias_only 写 true 时，~/.bashrc 里没有和号同名的别名就拒绝启动 CLI；不写是没有别名就直接运行 claude，
+  配置目录按 accounts 设。别名里管着代理、账号这些启动约束时打开，免得哪个号漏配别名就绕了过去。
+- 看板娘：xxlb 写 true 表示已经自己放好了 static/live2d/xxlb/ 的模型和 Live2D 运行库（开源版不带，见 static/js/xxlb.js），
+  新会话页才画她；不写就不去请求这些文件。
+- 电脑通路：pc_setup_url 写装电脑脚本、卸载脚本对外的地址（比如 "https://example.com"，不带结尾的斜杠），
+  设备页给的卸载命令从这里下；不写就用打开设备页时的地址。
 - 分享链接的地址：share_url 写成 "https://example.com" 这样（不带结尾的斜杠），主动分享时签发的只读链接在它后面接 /share/<随机凭证>。
   不写就用复制的人当时打开页面的地址；局域网地址发给校外的人是打不开的，所以给别人用的实例要写公网入口。
 - 额度换算：quota 写成 {"pts_per_five": 1.96, "five_in_week": 0.133}。pts_per_five 是这组号 5 小时额度的 1% 合多少点
@@ -237,23 +248,59 @@ PAID: set[str] = set() if FREE is None else {a for a in ACCOUNTS if base_account
 # 上游代理（见开头的说明）：写了 proxy_port 就经本机这个 HTTP 代理出网，所有号走同一个。
 # 没写又没亲手打开 allow_direct 时，server 启动就退出（server.py 解析完参数先查），proxy_port() 也抛错：
 # 出网的地方都从 proxy_port() 取端口，哪一处漏了检查也拿不到「直连」这个结果
-DEFAULT_PROXY_PORT: int | None = int(_conf["proxy_port"]) if _conf.get("proxy_port") else None
+# 端口表（proxy_table）：这一组（run_as，没写是跑查看器的用户）的号各走各的端口，号写 * 的是这一组的默认端口
+_table = os.environ.get("CC_PROXY_TABLE") or _conf.get("proxy_table")
+PROXY_TABLE: Path | None = Path(_table).expanduser() if _table else None
+_group = RUN_AS or pwd.getpwuid(os.getuid()).pw_name
+_ports: dict[str, int] = {}
+_table_default: int | None = None
+if PROXY_TABLE:
+    for _line in PROXY_TABLE.read_text().splitlines():   # 写了表却读不了就直接报错停下，不能当成没配代理
+        _f = _line.split()
+        if len(_f) >= 3 and not _f[0].startswith("#") and _f[0] == _group:
+            if _f[1] == "*":
+                _table_default = _table_default or int(_f[2])
+            elif _f[1] in ACCOUNTS:
+                _ports[_f[1]] = int(_f[2])
+DEFAULT_PROXY_PORT: int | None = _table_default or (int(_conf["proxy_port"]) if _conf.get("proxy_port") else None)
 ALLOW_DIRECT: bool = _conf.get("allow_direct") is True
-NO_PROXY = ("没配上游代理，拒绝启动：在数据目录的 instance.json 里写上 proxy_port（本机 HTTP 代理的端口）。"
+NO_PROXY = ("没配上游代理，拒绝启动：在数据目录的 instance.json 里写上 proxy_port（本机 HTTP 代理的端口），号多时也可以写 proxy_table（见 instance.py 开头）。"
             f"还没有 instance.json 就先把代码目录里的 instance.example.json 复制成 {_file} 再改。"
             "确实要不经代理直连，在 instance.json 里亲手把 allow_direct 改成 true（服务商会直接看到这台机器的出口地址）")
 
 
 def proxy_port(account: str) -> int | None:
     """这个号的网络通讯走本机哪个代理端口；None 是直连，只有 instance.json 亲手打开了 allow_direct 才会这样，没打开就抛错。"""
-    if DEFAULT_PROXY_PORT is None and not ALLOW_DIRECT:
+    port = _ports.get(base_account(account), DEFAULT_PROXY_PORT)
+    if port is None and not ALLOW_DIRECT:
         raise RuntimeError(NO_PROXY)
-    return DEFAULT_PROXY_PORT
+    return port
 
 
 # 账号面板上显示的：代理端口（打开了 allow_direct 又没配代理时是 None，界面上写「直连」）
-PROXIES: dict[str, dict | None] = {a: {"port": DEFAULT_PROXY_PORT, "tag": None, "region": ""} if DEFAULT_PROXY_PORT else None
-                                   for a in ACCOUNTS}
+# 节点名和地区照 proxy_info 写，没写或读不了就空着（只是显示用）
+_info_file = _conf.get("proxy_info")
+try:
+    _info = json.loads(Path(_info_file).expanduser().read_text()) if _info_file else {}
+except (OSError, ValueError):
+    _info = {}
+
+
+def _proxy_row(account: str) -> dict | None:
+    port = _ports.get(base_account(account), DEFAULT_PROXY_PORT)
+    if port is None:
+        return None
+    i = _info.get(str(port)) or {}
+    return {"port": port, "tag": i.get("tag"), "region": i.get("region", "")}
+
+
+PROXIES: dict[str, dict | None] = {a: _proxy_row(a) for a in ACCOUNTS}
+
+# 机器在界面上的叫法、只准经别名启动、看板娘、电脑通路的对外地址（见开头的说明）
+HOST_NAME: str = _conf.get("host_name") or "服务器"
+ALIAS_ONLY: bool = _conf.get("alias_only") is True
+XXLB: bool = _conf.get("xxlb") is True
+PC_SETUP_URL: str | None = (_conf.get("pc_setup_url") or "").rstrip("/") or None
 
 # GPT 号 → {codex_home, bridge_port, five_in_week, pts_per_five, week_only}（见开头的说明）；bridge_port 是这个号的翻译层在本机哪个端口
 _bridge_port = int(_conf.get("bridge_port") or 18765)

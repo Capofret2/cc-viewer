@@ -27,7 +27,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import hostfs
-from instance import ACCOUNTS, API, CALL, DATA, GPT, GUEST_DATA, proxy_port   # 额度历史记在这个实例的数据目录里（见 instance.py）
+from instance import ACCOUNTS, ALIAS_ONLY, API, CALL, DATA, GPT, GUEST_DATA, HOST_NAME, proxy_port   # 额度历史记在这个实例的数据目录里（见 instance.py）
 
 CWD = hostfs.Path(str(GUEST_DATA / ".usage_cwd"))
 WAIT_SECS = 40   # 从打开界面到看到用量，最多等这么久
@@ -137,7 +137,7 @@ def gpt_usage(alias: str) -> dict:
         with opener.open(req, timeout=20) as r:
             data = json.load(r)
     except urllib.error.HTTPError as e:
-        why = "Codex 的登录过期了，在运行查看器的机器上用一次 codex（或者网页里用一次这个号）让它刷新令牌" if e.code == 401 else e.reason
+        why = f"Codex 的登录过期了，在{HOST_NAME}上用一次 codex（或者网页里用一次这个号）让它刷新令牌" if e.code == 401 else e.reason
         raise RuntimeError(f"ChatGPT 用量接口回了 {e.code}：{why}") from None
     except (OSError, ValueError) as e:
         raise RuntimeError(f"问 ChatGPT 用量接口失败：{type(e).__name__}: {e}") from None
@@ -194,12 +194,14 @@ async def probe(alias: str, quota_dir: Path, source: str = "usage") -> dict:
     name = f"ccv-usage-{alias}-{os.getpid()}"
     # CC_VIEWER_LAUNCH=1：查看器拉起的，限量号的启动脚本才放行（见 chat.launch_env）。
     # 配了代理就在读完 .bashrc 之后换成它（instance.proxy_port），和网页对话走同一个；没配就照 .bashrc 原样。
-    # ~/.bashrc 里有和号同名的别名就用别名，没有就直接运行 claude，配置目录按账号表设（instance.ACCOUNTS）
+    # ~/.bashrc 里有和号同名的别名就用别名，没有就直接运行 claude，配置目录按账号表设（instance.ACCOUNTS）；
+    # 写了 alias_only 就只认别名，没有就报错退出（和 claude_via_bashrc.sh 一样）
     port = proxy_port(alias)
     p, s = f"http://127.0.0.1:{port}", f"socks5://127.0.0.1:{port}"
     env = f"export http_proxy={p} https_proxy={p} HTTP_PROXY={p} HTTPS_PROXY={p} all_proxy={s} ALL_PROXY={s}; " if port else ""
     conf = f"CLAUDE_CONFIG_DIR={shlex.quote(ACCOUNTS[alias])} " if ACCOUNTS.get(alias) else ""
-    run = f'if [ "$(type -t {alias})" = alias ]; then {alias}; else {conf}claude; fi'
+    other = f'echo "~/.bashrc 里没有 {alias} 这个别名" >&2; exit 127' if ALIAS_ONLY else f"{conf}claude"
+    run = f'if [ "$(type -t {alias})" = alias ]; then {alias}; else {other}; fi'
     await tmux("new-session", "-d", "-s", name, "-x", "160", "-y", "50", "-c", str(CWD),
                f"CC_VIEWER_LAUNCH=1 bash -i -c {shlex.quote(env + run)}")
     screen, sent, t0 = "", False, time.monotonic()

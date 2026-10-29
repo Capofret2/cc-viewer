@@ -56,8 +56,14 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PY = sys.executable
-INSTANCES = {"local": None}   # 实例 → 数据目录；None 是本实例（当前环境的 CC_VIEWER_DATA，不设就是代码目录）
+# 私有部署可以放一个 sessions_private.py（不在开源版里）：给出 PY、INSTANCES，和以别的实例的身份、数据目录跑本脚本的 run，
+# 回忆就能一起搜同一台机器上别的实例；没有就只搜本实例
+try:
+    import sessions_private as _priv
+except ImportError:
+    _priv = None
+PY = getattr(_priv, "PY", None) or sys.executable
+INSTANCES = getattr(_priv, "INSTANCES", None) or {"local": None}   # 实例 → 数据目录；None 是本实例（当前环境的 CC_VIEWER_DATA，不设就是代码目录）
 START = time.time()   # 搜索按总时间收口：整个命令要在十秒内给结果
 CHILD_LIMIT = 15      # 一份子进程最多等这么久：补索引 6.5 秒就收手，换身份再花两三秒；卡住了也不能让人干等
 GONE = ("list", "show", "index")
@@ -590,9 +596,12 @@ def run_child(inst, argv, local=False):
     local 为真（--single，查看器自己调的）是就以当前身份、当前数据目录搜，环境原样传下去"""
     me = [PY, os.path.abspath(__file__), *argv, "--here", inst]
     try:
-        if not local and INSTANCES[inst] is not None:   # 只搜本实例：照当前环境的 CC_VIEWER_DATA
+        if not local and _priv is not None:   # 别的实例怎么跑由私有模块定（换身份、换数据目录）
+            r = _priv.run(inst, me, CHILD_LIMIT)
+        elif not local and INSTANCES[inst] is not None:   # 只搜本实例：照当前环境的 CC_VIEWER_DATA
             sys.exit(f"不支持搜别的实例：{inst}")
-        r = subprocess.run(me, capture_output=True, text=True, timeout=CHILD_LIMIT, env=dict(os.environ))
+        else:
+            r = subprocess.run(me, capture_output=True, text=True, timeout=CHILD_LIMIT, env=dict(os.environ))
     except subprocess.TimeoutExpired:
         print(f"！有一部分会话 {CHILD_LIMIT} 秒还没搜完，这次没算进去", file=sys.stderr)
         return []

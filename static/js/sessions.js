@@ -1,6 +1,7 @@
 // 找会话、开会话：文件选择器、全部会话看板、最近会话菜单、新建会话，以及给会话打标签
 const { ref, reactive, computed, watch } = Vue;
 import { api, fileName, touch, store, say, fail, who, me, persistRef, persistReactive, shortSpan } from './util.js';
+import { setXxlb } from './xxlb.js';
 import { setTagColors, tagColors } from './tag-color.js';
 import { setRates, spentPoints } from './points.js';
 import { siteNames } from './acct-tag.js';
@@ -119,6 +120,9 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
       readPwa();
       firstMessageImages.value = c.firstMessageImages === true;
       if (c.call) who.me = c.call;
+      if (c.host) who.host = c.host;
+      who.pcSetupUrl = c.pcSetupUrl || '';
+      setXxlb(c.xxlb === true);   // 部署者放好了看板娘的模型才画（xxlb.js）
       setRates(c.rates);   // 换算点数用的单价
       configError.value = '';
       await loadEnvironments();

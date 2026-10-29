@@ -38,7 +38,7 @@ MODES = ("dontAsk", "acceptEdits", "auto", "plan", "bypassPermissions")
 # 用别名启动，代理和账号目录都以 .bashrc 为准；账号表里记的配置目录只用来反查启动 server 的 shell 用的是哪个号。
 # 一组的几个号会话记录都软链接到 ~/.claude/projects，所以查看器不用分账号去找。
 import weakref
-from instance import (ACCOUNTS, API, API_ENTRIES, BANNED, DEFAULT_PROXY_PORT, GPT, GPT_MODELS, GW_SOCKET, PROXIES,
+from instance import (ACCOUNTS, ALIAS_ONLY, API, API_ENTRIES, BANNED, DEFAULT_PROXY_PORT, GPT, GPT_MODELS, GW_SOCKET, PROXIES,
                       REMOTE, REMOTE_GPT, RUN_AS, base_account, bridge_port, proxy_port)
 import api_relay   # noqa: E402   API 号（DeepSeek）的请求经闸门补上密钥再转出去
 import gate   # noqa: E402   网络闸门：拦下以后掐断 CLI 去 anthropic.com 的连接
@@ -193,10 +193,15 @@ RECALL_SELF = """
 
 # 回忆搜索（sessions.py grep）的用法：instance.RECALL 开着、共用环境、会话主人是查看器账号才给（viewer_prompt）。
 # 换了别的模型的会话找旧话时会自己临时写 grep、脚本去扫几 GB 的会话记录，又慢又漏，所以直接告诉它有现成的
+# 私有部署可以放一个 sessions_private.py（不在开源版里）让回忆也搜同一台机器上别的实例，它要给 AI 多交代的一句接在回忆命令后面
+try:
+    from sessions_private import RECALL_NOTE as _RECALL_NOTE
+except ImportError:
+    _RECALL_NOTE = ""
 VIEWER_RECALL = f"""
 
 翻以前的会话：
-- 要找以前会话里说过的话、提到过的事（回忆），用 `python3 {Path(__file__).parent}/sessions.py grep <词>`，\
+- 要找以前会话里说过的话、提到过的事（回忆），用 `python3 {Path(__file__).parent}/sessions.py grep <词>`{_RECALL_NOTE}，\
 不要自己写 grep 或脚本去扫会话记录。它一次搜全部会话的正文气泡，不含工具记录，几秒出结果，\
 最前面是总数和命中最多的会话，后面按会话分组（会话的先后随机）：每组开头写会话编号开头、会话主人和会话概况（新建和最后一条的时刻、气泡条数、上下文、花费、工作目录），组里每条给出时间和原文，按时间从旧到新。
 - 气泡分几类：`-u` 用户说的话，`-a` 助手说的话，`-s` 会话的 100 字短摘要（查看器在后台写的，很多会话还没有），`--long-summary` 1000 字长摘要；\
@@ -414,12 +419,14 @@ def launch_env(account: str) -> dict[str, str]:
     # CC_VIEWER_PROXY：配了代理时这个号的代理。没有闸门时（开窗服务 keeper）由 claude_via_bashrc.sh 在 .bashrc 之后换上；
     # 有闸门时闸门优先，闸门自己按同一个端口转。没配代理（打开了 allow_direct）就不给，直连。
     # CLAUDE_CONFIG_DIR：这个号的配置目录（instance.json 的 accounts）；~/.bashrc 里没有同名别名时启动脚本直接运行 claude，靠它认号
+    # CC_VIEWER_ALIAS_ONLY：instance.json 写了 alias_only，~/.bashrc 里没有同名别名时启动脚本拒绝启动，不直接运行 claude
     import personas
     return {"CC_ALIAS": account, "CLAUDE_CODE_ENTRYPOINT": "cli", "CC_VIEWER_LAUNCH": "1",
             # 状态栏脚本按这个认号：远端回环和 GPT 号都用默认的 ~/.claude，光看配置目录会认错（见 quota_statusline.account）
             "CC_VIEWER_ACCOUNT": account,
             **({"CC_VIEWER_PROXY": f"http://127.0.0.1:{proxy_port(account)}"} if proxy_port(account) else {}),
             **({"CLAUDE_CONFIG_DIR": ACCOUNTS[account]} if ACCOUNTS[account] else {}),
+            **({"CC_VIEWER_ALIAS_ONLY": "1"} if ALIAS_ONLY else {}),
             **({"CC_VIEWER_GW": GW_SOCKET} if GW_SOCKET else {}),
             **({"CC_VIEWER_PERSONA": personas.socket_path} if personas.socket_path else {})}
 

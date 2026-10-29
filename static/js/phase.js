@@ -2,13 +2,16 @@
 // 每条只说一件事：哪一段（src）、在等什么（text）。新会话、续接、插话、工具执行完接着请求，这些只写在括号里，不改主语义。
 // 阶段由服务器推来（chat.Driver.status、server.Tab.prep、server.Birth），这里只管怎么写。
 
+import { who } from './util.js';
+
 // 链路上的各段，从浏览器往外：网络 → 查看器 → Claude Code → 工具 / 出网 → 上游
+// 机器的叫法跟着实例配置（who.host），读的时候现取
 export const SRC_TIPS = {
-  网络: '浏览器和服务器上的查看器之间',
-  查看器: '服务器上的网页查看器自己在做的事',
-  'Claude Code': '服务器上的 Claude Code 进程',
-  工具: 'Claude Code 在服务器上执行的工具',
-  出网: '服务器连到目标网站的这一段（配了代理就经代理）',
+  get 网络() { return `浏览器和${who.host}上的查看器之间`; },
+  get 查看器() { return `${who.host}上的网页查看器自己在做的事`; },
+  get 'Claude Code'() { return `${who.host}上的 Claude Code 进程`; },
+  get 工具() { return `Claude Code 在${who.host}上执行的工具`; },
+  get 出网() { return `${who.host}连到目标网站的这一段（配了代理就经代理）`; },
   上游: 'Claude、ChatGPT 或 DeepSeek 的服务器',
 };
 // 标签配色：网络红、出网黄、上游主题色，其余灰
