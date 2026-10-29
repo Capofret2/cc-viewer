@@ -209,18 +209,21 @@ export const CtxRing = {
 // 两种视角一整套：切换的滑动药丸（和思考强度那个一样）、此刻视角的总数、叠在同一格里的两张环形图。
 // 两张叠着放、不在看的那张只是藏起来照样占地方：高度总按高的那张算，切换时不伸不缩。
 // 上下文药丸的悬停卡片（foot：切换那一行放在最底下、挨着药丸，卡片往上开、底边不动，按钮不会跟着内容跳）
-// 和会话信息弹窗的最上面（切换那一行在图上面）共用；extra 插槽放那一行最右边的按钮
+// 和会话信息弹窗的最上面（切换那一行在图上面）共用；extra 插槽放那一行最右边的按钮。
+// solo：只画这一种视角、不给切换，顶上那一行写这张图是什么（底下那排里上下文、花费各一颗，卡片里不再互相切换）；
+// 那排挤得把花费并回上下文那颗时（app.js 的 fitTools）上下文的卡片不给 solo，照旧能切换
 export const CtxViews = {
   components: { CtxRing, SpentPts },
-  props: { maps: Object, view: String, tabId: String, ctx: Object, spent: Object, spentPaid: Object, spentBlue: Object, foot: Boolean },
+  props: { maps: Object, view: String, tabId: String, ctx: Object, spent: Object, spentPaid: Object, spentBlue: Object, foot: Boolean, solo: String },
   emits: ['update:view', 'jump'],
   setup(props) {
-    const kind = computed(() => (props.view === 'spend' ? 'spend' : 'ctx'));
+    const kind = computed(() => props.solo || (props.view === 'spend' ? 'spend' : 'ctx'));
     return { kind, kilo };
   },
   template: `<div class="ctx-views-box" :class="{ foot }">
     <div class="dd-title ctx-switch">
-      <div class="effort-seg ctx-views" :style="{ '--n': 2, '--i': kind === 'spend' ? 1 : 0 }">
+      <template v-if="solo">{{ solo === 'spend' ? '花费' : '上下文' }}</template>
+      <div v-else class="effort-seg ctx-views" :style="{ '--n': 2, '--i': kind === 'spend' ? 1 : 0 }">
         <i class="effort-thumb"></i>
         <button type="button" :class="{ on: kind === 'ctx' }" @click.stop="$emit('update:view', 'ctx')">上下文</button>
         <button type="button" :class="{ on: kind === 'spend' }" @click.stop="$emit('update:view', 'spend')">花费</button>
@@ -231,7 +234,7 @@ export const CtxViews = {
       <slot name="extra"></slot>
     </div>
     <div class="ctx-stack">
-      <ctx-ring v-for="v in ['ctx', 'spend']" :key="v" :kind="v" :class="{ off: kind !== v }"
+      <ctx-ring v-for="v in (solo ? [solo] : ['ctx', 'spend'])" :key="v" :kind="v" :class="{ off: kind !== v }"
                 :tree="maps[v].tab === tabId ? maps[v].data : null" :max="ctx?.max || 0"
                 :loading="maps[v].loading" :error="maps[v].tab === tabId ? maps[v].error : ''" @jump="s => $emit('jump', s)"></ctx-ring>
     </div>

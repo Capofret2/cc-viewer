@@ -3,6 +3,7 @@ const { ref, reactive, computed, watch } = Vue;
 import { api, fileName, touch, store, say, fail, who, me, persistRef, persistReactive, shortSpan } from './util.js';
 import { setTagColors, tagColors } from './tag-color.js';
 import { setRates, spentPoints } from './points.js';
+import { siteNames } from './acct-tag.js';
 import { withTab } from './tabs.js';
 
 export function useSessions({ tabs, current, select, openTab, readonly, newFresh, promote, personaOf, rememberPersona, confirmPersona }) {
@@ -102,6 +103,7 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
       picker.root = c.root;
       readonly.value = c.readonly !== false;
       accounts.value = c.accounts || [];
+      for (const a of accounts.value) if (a.relay && a.api) siteNames[a.name] = a.api;   // 中转站号的标签写站名（acct-tag.js）
       defaultAccount.value = c.account || '';
       modeList.value = c.modes || [];
       defaultMode.value = c.defaultMode || '';
@@ -178,7 +180,7 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
 
   // 全部会话总览：分组的卡片墙，左边一栏标签，选中哪个就只看带这个标签的会话（tag 为空是全部）。
   // 服务器给的 groups 总是按工作区分好的；换别的分组方式、按用量排都在这里重排，不用重新请求
-  // deleted 是在查看器里删掉、这个人能恢复的会话（服务器只给会话主人和查看器账号），排在卡片墙最下面
+  // deleted 是在查看器里删掉、这个人能恢复的会话（服务器只给会话所属用户和查看器账号），排在卡片墙最下面
   // testWorkspace：服务器给了才出「显示测试会话」开关（旧后端不在组上标 test，开不开都一样）
   const overview = reactive({ open: false, loading: false, error: '', groups: [], deleted: [], tag: '', recentOf: 0, testWorkspace: '' });
   // 测试会话：工作目录在测试工作区里的（服务器在组上标 test），全部会话和最近会话里默认不显示，开关打开才显示。
@@ -202,7 +204,7 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
   // 全部会话那一页（从账号页的「管理会话」进）：查看器账号看到所有人的会话（查看器账号在那里就是要管所有人的），
   // 别人照旧只看自己的；新用户（me.newUser）是查看器账号也只看自己的
   const ovOwn = computed(() => !!me.newUser || !me.admin);
-  // 是不是自己的会话：单用户实例里服务器不发主人（owner 一律是 null），会话都是这一个人的
+  // 是不是自己的会话：单用户实例里服务器不发所属用户（owner 一律是 null），会话都是这一个人的
   const isMine = owner => !me.multi || owner === me.name;
   const mineOnly = (groups, mine) => groups.map(g => ({ ...g, sessions: g.sessions.filter(s => isMine(s.owner) === mine) }))
     .filter(g => g.sessions.length);
@@ -213,7 +215,7 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
     const all = mineOnly(testFree.value, false).flatMap(g => g.sessions.map(s => ({ ...s, ws: g.name })));
     return { key: 'others', sessions: (overview.tag ? all.filter(s => s.tags?.includes(overview.tag)) : all).sort((a, b) => b.mtime - a.mtime) };
   });
-  // 看法存在浏览器里（和主题、显示开关一样是本地偏好）：group 按目录 dir / 按会话主人 owner / 不分组 none；
+  // 看法存在浏览器里（和主题、显示开关一样是本地偏好）：group 按目录 dir / 按所属用户 owner / 不分组 none；
   // sort 是最近更新 mtime，或最近 mins 分钟的用量 recent（谁都能选，只算自己看得到的会话）。
   // 用户管理、余额看板里的「最近多少分钟」也用这个 mins，几处填一样的数才对得上
   // adminSort 是用户管理的排序：注册先后 join，或最近用量 recent；boardSort 是余额看板的：余额 balance、join、recent。
@@ -222,7 +224,7 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
   const ovView = persistReactive('overviewView',
     { v: 3, group: 'none', sort: 'recent', mins: 300, adminSort: 'recent', boardSort: 'recent' },
     saved => (saved.v === 3 ? saved : {}));
-  // 实际生效的：按会话主人分组只在多用户实例里有（单用户实例的会话都是同一个人的）
+  // 实际生效的：按所属用户分组只在多用户实例里有（单用户实例的会话都是同一个人的）
   const ovGroup = computed(() => (ovView.group === 'owner' && !me.multi ? 'dir' : ovView.group));
   const byRecent = computed(() => ovView.sort === 'recent');
   const okMins = () => Number.isFinite(ovView.mins) && ovView.mins > 0 && ovView.mins <= 43200;
@@ -607,9 +609,10 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
   // showTests：「显示测试会话」存在服务器上的那份，登录了才是 true / false，否则是 null（用浏览器里记的）
   // autoSwitch：当前的号被预测拦截拦下时自动切号（users.auto_switch），登录了才是 true / false，游客和旧后端是 null（不出这个开关）
   // features：新会话页上人设卡（persona）、共用环境（shared）、标签（tags）开没开，服务器给了才有，否则是 null（全都显示）
+  // voice / voiceServices：讯飞语音输入的配置和能选的识别服务（voice.js、服务器 voice.py）
   const globalSettings = reactive({ settings: {}, mine: null, canGlobal: false, default: { account: '', why: '' }, private: '',
                                     fresh: null, showTests: null, features: null, autoSwitch: null, bottomTabs: null,
-                                    fallback: '', busy: false, error: '' });
+                                    voice: null, voiceServices: [], fallback: '', busy: false, error: '' });
   function applySettings(r) {
     Object.assign(globalSettings, { settings: r.settings || {}, mine: r.mine || null,
                                     canGlobal: !!r.canGlobal, default: r.default || {},
@@ -617,7 +620,10 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
                                     showTests: typeof r.showTests === 'boolean' ? r.showTests : null,
                                     features: r.features || null,
                                     autoSwitch: typeof r.autoSwitch === 'boolean' ? r.autoSwitch : null,
-                                    bottomTabs: typeof r.bottomTabs === 'boolean' ? r.bottomTabs : null, fallback: r.fallback || '' });
+                                    bottomTabs: typeof r.bottomTabs === 'boolean' ? r.bottomTabs : null,
+                                    // voice：讯飞语音输入的配置（voice.js），{} 是没配、null 是游客或旧后端（不出这项设置和语音按钮）
+                                    voice: r.voice && typeof r.voice === 'object' ? r.voice : null, voiceServices: r.voiceServices || [],
+                                    fallback: r.fallback || '' });
   }
   async function loadSettings() {
     if (readonly.value) return;
@@ -631,7 +637,7 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
   }
 
   // 新会话页只放用户开了的几项：人设卡、共用环境、标签各一个开关，跟着账号存（users.features），
-  // 没切过的人设卡、共用环境按用没用过定，标签一律关着。persona 那个键在设置里叫「二次元风格UI」，
+  // 没切过的人设卡、共用环境按用没用过定（二次元另外累计花掉超过 5 毛也开），标签一律关着。persona 那个键在设置里叫「二次元风格UI」，
   // 同时管新会话页的颜文字；它只管外观，关着时人设卡照样用（最近选的那张，人设卡页上改）。别的关着的那项在新会话页上不出现，也不偷偷生效：
   // 标签关着就不打，共用环境关着就只在自己的独立环境里开会话。游客、旧后端（不给这个键）照旧全有
   const feature = k => globalSettings.features?.[k] !== false;
@@ -858,7 +864,7 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
   // 标签页栏的加号：左键开一个空白的新会话标签页（家目录、不带标签、账号按全局设置），
   // 说出第一句话才真正建会话；右键走选文件夹的交互式新建。只读模式不能新建，左右键都是打开会话。
   // 权限、模型、账号在看板的小标签上选（和已有的会话一样），先记在这个标签页上，建会话时一起交给服务器；
-  // 模型不选就按 Claude Code 自己的设置。多用户实例里还有会话主人和可见范围：登录了就是自己的、默认只有自己看得到（可改），
+  // 模型不选就按 Claude Code 自己的设置。多用户实例里还有会话所属用户和可见范围：登录了就是自己的、默认只有自己看得到（可改），
   // 游客建的是无主会话
   // 运行环境、工作区、标签照上次发第一句话时选的填：登录了存在服务器上、各设备共用，
   // 游客和单用户实例记在这个浏览器里。上次选的独立环境现在没有了就是共用环境。人设卡另有自己的默认，见 personas.js
@@ -919,7 +925,9 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
                 // 人设卡同样交界面上选中的那张（没选过就是自己设的默认），空字符串是不用
                 persona, ...(personaConsent ? { personaConsent } : {}), remember: true,
                 // 取消勾选的工作设备（devices.js 的 toggleWork），没取消过不交：登记了的都能用
-                ...(tab.workOff?.length ? { devicesOff: tab.workOff } : {}) } });
+                ...(tab.workOff?.length ? { devicesOff: tab.workOff } : {}),
+                // 从待办页勾选发来的那几条（todos.js 的 sendPicked）：服务器记上从它们开出、替这个会话认领。旧后端不认这个字段，照常建会话
+                ...(tab.todoIds?.length ? { todos: tab.todoIds } : {}) } });
       // 服务器收下了就记住这次选的（登录了服务器已经存好，这里只是不用等下次取设置），下个新会话标签页照着填
       const fresh = { environment, cwd: tab.cwd.trim() || '~', tags: [...tags] };
       if (me.multi && me.name) globalSettings.fresh = fresh;
@@ -928,6 +936,8 @@ export function useSessions({ tabs, current, select, openTab, readonly, newFresh
       const born = new Promise((resolve, reject) => (tab.birthWait = { resolve, reject }));
       Object.assign(tab, { birth: r.id, running: true, phase: r.phase, phaseAt: Date.now() });
       await born;
+      // 建成了才清：没建成话退回输入框，说明卡片还挂着，再发一次照样算从这几条待办开出
+      Object.assign(tab, { todoIds: null, todoNote: null });
       loadTags();
     } finally { tab.busy = false; }
   }

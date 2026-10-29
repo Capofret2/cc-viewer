@@ -163,12 +163,14 @@ async def connect(host: str, port: int | None, link):
         raise
 
 
-def model_body(account: str, body: bytes) -> bytes:
-    """平台渠道名只映射 model，不改消息内容，也不退到普通渠道。"""
+def model_body(account: str, body: bytes) -> tuple[bytes, str]:
+    """平台渠道名只映射 model，不改消息内容，也不退到普通渠道。返回（发出的正文，这个模型实际用哪把钥匙的号）：
+    同一站可以有几把令牌（IKun 的 cc-kiro 和 gemini 分组，2026-10-30 起），model_keys 把模型指到拿另一把钥匙的号上
+    （那个号用 present_as 并进这个号，见 instance），钥匙、渠道映射和缓存价目都按那个号的来，界面上仍是一家。"""
     from instance import API, api_models
-    config = API[account]
     if not is_relay(account):
-        return body
+        return body, account
+    config = API[account]
     try:
         data = json.loads(body)
         model = data.get("model")
@@ -176,50 +178,74 @@ def model_body(account: str, body: bytes) -> bytes:
         raise RelayError("模型请求不是合法的 JSON 对象") from None
     if model not in api_models(account):
         raise RelayError(f"{account} 只接入了 {'、'.join(api_models(account))}，未发送其他模型的请求")
-    if config.get("cache_ttl") == "5m":
+    holder = config.get("model_keys", {}).get(model, account)
+    holder_config = API[holder]
+    if holder_config.get("cache_ttl") == "5m":
         def hour_cache(value):
             if isinstance(value, dict):
                 return (isinstance(value.get("cache_control"), dict) and value["cache_control"].get("ttl") == "1h") or any(hour_cache(v) for v in value.values())
             return isinstance(value, list) and any(hour_cache(v) for v in value)
         if hour_cache(data):
             raise RelayError(f"{account} 尚未配置一小时缓存价格，未发送；请使用五分钟缓存")
-    mapped = config.get("model_overrides", {}).get(model)
+    mapped = holder_config.get("model_overrides", {}).get(model)
     if mapped:
         data["model"] = mapped
-        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode()
-    return body
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode(), holder
+    return body, holder
 
 
 async def forward(reader, writer, head, driver, proxy_port, link, meter):
     """在闸门认过通行证以后调用（gate._serve）：只给 API 号的会话转，被拦下的不转。"""
     import gate
     import platform_costs
-    from instance import API
+    from instance import API, REMOTE
     upstream = pair = None
     audit = None
     replied = False
     try:
-        if not driver or driver.account not in API:
+        # 远端统一结算的 GPT 号也走这里：它的请求只转给另一个查看器，不碰本机的翻译层
+        remote = REMOTE.get(driver.account) if driver else None
+        if not driver or (driver.account not in API and not (remote and remote.get('billing') == 'upstream')):
             await gate._reply(writer, "403 Forbidden", "代理：这个连接不能用这个接口")
             return
-        v, secret = vendor(driver.account), key(driver.account)
+        if remote and remote.get('billing') == 'upstream':
+            import users
+            if users.owner_of(driver.session_id) != remote['user']:
+                raise RelayError('这个远端入口未授权给当前用户')
+            target = urlsplit(remote['url'])
+            v = {'host': target.netloc, 'prefix': ''}
+            secret = Path(remote['key_file']).read_text().strip()
+            if not secret.startswith('ccv-api-'):
+                raise RelayError('远端入口的导出密钥无效')
+        else:
+            remote = None
+            v = vendor(driver.account)
         if link is not None:
             link["host"] = v["host"]
         if meter is not None:
             meter["host"] = v["host"]
         method, path, route, headers, length = request_parts(head)
-        if method == b'POST' and path == '/v1/messages' and platform_costs.enabled(driver.account):
-            from platform_costs_wire import ResponseAudit
-            audit = ResponseAudit(driver.session_id)
         if method not in (b"GET", b"POST"):
             raise RelayError("中转只支持 GET 和 POST")
         body = await asyncio.wait_for(reader.readexactly(length), 60) if length else b""
-        if method == b"POST" and path.startswith("/v1/messages"):
-            body = model_body(driver.account, body)
+        if remote and path not in ('/v1/messages', '/v1/messages/count_tokens', '/v1/models'):
+            raise RelayError('远端入口不支持这个接口')
+        holder = driver.account   # 这个模型实际用哪把钥匙的号（同站第二把令牌，model_keys 并号）：没指到别的号就是自己
+        if method == b"POST" and path.startswith("/v1/messages") and not remote:
+            body, holder = model_body(driver.account, body)
+        if not remote:
+            secret = key(holder)
+        # 对账跟着钥匙走：这个模型的消费日志在持钥匙的号名下（同站第二把令牌并号），本地回包也记在它那边才配得上对
+        if method == b'POST' and path == '/v1/messages' and not remote and platform_costs.enabled(holder):
+            from platform_costs_wire import ResponseAudit
+            audit = ResponseAudit(driver.session_id)
         if driver.gate_why():
             await gate._reply(writer, "403 Forbidden", driver.gate_why())
             return
-        response, upstream = await connect(v["host"], proxy_port, link)
+        if remote:
+            response, upstream = await asyncio.wait_for(asyncio.open_connection(target.hostname, target.port), 5)
+        else:
+            response, upstream = await connect(v["host"], proxy_port, link)
         pair = (writer, upstream)
         gate._conns.setdefault(driver.gate_token, set()).add(pair)
         # 上传正文期间也可能被拦下：连接登记好以后再核一次，之后由 gate.cut 当场掐断两头
@@ -279,21 +305,73 @@ async def forward(reader, writer, head, driver, proxy_port, link, meter):
             record = audit.finish()
             if record.get('request_id'):
                 try:
-                    await asyncio.to_thread(platform_costs.save_local, driver.account, record)
+                    await asyncio.to_thread(platform_costs.save_local, holder, record)
                 except (OSError, ValueError, platform_costs.sqlite3.Error) as exc:
-                    print(f'{driver.account} 平台对账的本地记录未保存（{type(exc).__name__}），不影响原响应', flush=True)
+                    print(f'{holder} 平台对账的本地记录未保存（{type(exc).__name__}），不影响原响应', flush=True)
             elif replied:
-                print(f'{driver.account} 回包没有平台请求编号，无法精确对账', flush=True)
+                print(f'{holder} 回包没有平台请求编号，无法精确对账', flush=True)
+
+
+def refuse_remote(account: str):
+    """远端统一结算的号这边只有导出密钥：拿它去问原平台既查不到，还会把密钥发给原平台，所以一律不查。"""
+    from instance import REMOTE
+    if REMOTE.get(account, {}).get("billing") == "upstream":
+        raise RuntimeError(f"{account} 由远端结算，余额和额度要到那边看，这边不查原平台")
+
+
+def relay_balance(account: str, v: dict, token_file, port: int) -> dict:
+    """new-api 系中转站的账号余额（2026-10-29 起，主人给了空悲切的账号访问令牌）：API 密钥查不了账号信息，要访问令牌，
+    放在 ~/.config/cc_viewer/<号>.token（0600，不放配置里，有这个文件才算接了）。金额换算照对账那套 /api/status 的参数核
+    （platform_costs.conversion，参数变了就报错不算）。只读，不消耗额度。"""
+    try:
+        token = token_file.read_text().strip()
+    except OSError as e:
+        raise RuntimeError(f"读 {v['name']} 的访问令牌失败：{e}") from None
+    if not re.fullmatch(r"[\x21-\x7e]{16,}", token):
+        raise RuntimeError(f"{v['name']} 的访问令牌文件里不是一个令牌")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"https": f"http://127.0.0.1:{port}"}))
+
+    def get(path, auth=False):
+        headers = {"Accept": "application/json", **({"Authorization": f"Bearer {token}"} if auth else {})}
+        req = urllib.request.Request(f"https://{v['host']}{path}", headers=headers)
+        with opener.open(req, timeout=20) as r:
+            return json.load(r)
+
+    def _data(got):
+        if not isinstance(got, dict) or got.get("success") is not True:
+            raise RuntimeError(f"{v['name']} 没确认查询成功，请检查访问令牌权限或平台状态")
+        return got.get("data")
+
+    try:
+        # 两个接口都回 {"success": true, "data": …}，只认 success 的那份（和对账的 _get 同一个规矩）
+        status = _data(get("/api/status"))
+        # 金额显示参数：空悲切按人民币、SISUO 按美元（一元对一美元，主人定的：界面照数显示，不折算）。
+        # 只认核对过的这两套参数，别的报错不算，不拿没核对的汇率硬算
+        display, per_unit = status.get("quota_display_type"), status.get("quota_per_unit")
+        if display not in ("CNY", "USD") or float(per_unit) != 500000 or float(status.get("usd_exchange_rate")) != 1:
+            raise RuntimeError(f"{v['name']} 的金额显示参数变了（{display}、{per_unit}），先不查，要重新核对")
+        user = _data(get("/api/user/self", True)) or {}
+        yuan = float(user["quota"]) / float(per_unit)
+        return {"total": yuan, "granted": 0.0, "topped": yuan, "currency": display, "available": True,
+                "used": float(user.get("used_quota") or 0) / float(per_unit)}
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"{v['name']} 查余额的接口回了 {e.code}：{'访问令牌不对或已失效' if e.code == 401 else e.reason}") from None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise RuntimeError(f"问 {v['name']} 余额失败：{type(e).__name__}: {e}") from None
 
 
 def balance(account: str) -> dict:
-    """问这家平台这个号还有多少钱（DeepSeek：GET /user/balance）。返回 {total 元, granted 赠金, topped 充值, currency, available}；
-    配了代理就经代理（instance.proxy_port），没配就直连。出错抛 RuntimeError，说明里不带密钥。"""
-    from instance import proxy_port
+    """问这家平台这个号还有多少钱（DeepSeek：GET /user/balance；new-api 系中转站：访问令牌查 /api/user/self）。
+    返回 {total 元, granted 赠金, topped 充值, currency, available}；配了代理就经代理（instance.proxy_port），没配就直连。出错抛 RuntimeError，说明里不带密钥。"""
+    from instance import proxy_port, RELAY
+    refuse_remote(account)
     v = vendor(account)
     if "quota" in v:
         return quota(account)
     if "balance" not in v:
+        token_file = Path.home() / ".config/cc_viewer" / f"{account}.token"
+        if account in RELAY and token_file.is_file():
+            return relay_balance(account, v, token_file, proxy_port(account))
         return {"unavailable": "未接入余额查询"}
     req = urllib.request.Request(f"https://{v['host']}{v['balance']}",
                                  headers={"Authorization": f"Bearer {key(account)}", "Accept": "application/json"})
@@ -324,6 +402,7 @@ def quota(account: str) -> dict:
     返回 {five, week 用了百分之几, five_reset, week_reset（unix 秒）, level 套餐档}；和余额存在同一处（usage_probe.save_balance），
     另记一份历史，以后拿读数和调用的 token 数拟合单价。配了代理就经代理，没配就直连。"""
     from instance import proxy_port
+    refuse_remote(account)
     v = vendor(account)
     req = urllib.request.Request(f"https://{v['host']}{v['quota']}", headers={"Authorization": key(account), "Accept": "application/json"})
     port = proxy_port(account)

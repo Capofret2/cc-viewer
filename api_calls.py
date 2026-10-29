@@ -1,5 +1,6 @@
 """每次 API 调用是哪个号发的：一次调用一行，记在 api_calls.jsonl。
-    {"ts", "account", "source": "web" | "terminal", "session", "agent", "mid"}
+    {"ts", "account", "source": "web" | "terminal" | "remote", "session", "agent", "mid"}
+remote 表示这次调用已由另一个查看器结算，只展示费用，本地不重复扣款；以实际 CLI 路线标记，不按切换时间猜历史。
 mid 是回复编号，session 是会话编号（会话文件名），agent 是子代理的文件名（主对话、或记的时候不知道是哪个子代理就不写）。
 
 会话记录里有 token 数但不写是哪个号发的，所以要趁知道的时候当场记。token 数不记在这里，一律从会话记录里取（calls.py），
@@ -71,6 +72,7 @@ class Index:
         self.off = 0
         self.first: dict[str, tuple[str, str | None]] = {}
         self.by_sid: dict[str | None, dict[str, str]] = {}
+        self.remote: set[str] = set()   # 真正走远端结算的调用，不能用改配置的时刻倒推历史
         self.start: float | None = None   # 最早一行的时间：开始记调用的时刻
         # 按文件里的先后：(时间, 回复编号, 号, 会话编号)。预定额度要按号、按时间找调用（reserve.py）
         self.order: list[tuple[float, str, str, str | None]] = []
@@ -100,6 +102,8 @@ class Index:
                 t = stamp(r["ts"])
                 self.start = t if self.start is None else min(self.start, t)
                 self.first[mid] = (acc, r.get("session"))
+                if r.get('source') == 'remote':
+                    self.remote.add(mid)
                 self.by_sid.setdefault(r.get("session"), {})[mid] = acc
                 self.order.append((t, mid, acc, r.get("session")))
             self.off += end
@@ -179,6 +183,11 @@ def merge(rows: list[dict]) -> int:
         return len(new)
 
 
+def web_source(account):
+    import instance
+    return 'remote' if instance.remote_billed(account) else 'web'
+
+
 def record(main: Path | str, account: str, source: str, wait: float = 5) -> int:
     """按会话文件（连同子代理）记下新出现、还没记过的调用，都算在 account 头上。
     第一次碰到这个会话，只从现在的末尾开始记。返回记了几次。"""
@@ -223,11 +232,11 @@ def start(main: Path | str, account: str, fresh: bool = False):
         if fresh or not ent or not ent.get("account"):
             for p in calls.files_of(main):
                 state[str(p)] = {"offset": 0 if fresh else size(p)}
-            state[str(main)].update(account=account, source="web")
+            state[str(main)].update(account=account, source=web_source(account))
             save_state(state)
             return
     record(main, ent["account"], ent.get("source") or "web")
     with locked(5):
         state = load_state()
-        state[str(main)].update(account=account, source="web")
+        state[str(main)].update(account=account, source=web_source(account))
         save_state(state)

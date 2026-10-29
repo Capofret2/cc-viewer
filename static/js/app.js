@@ -1,7 +1,7 @@
 // 主程序：显示设置 + 把各块接起来。具体逻辑都在各自的模块里
 const { createApp, ref, computed, watch, nextTick, provide } = Vue;
 const { reactive } = Vue;
-import { api, persistRef, persistReactive, touch, fileName, clock, kilo, ago, shortModel, modelName, modelFamily, say, fail, who, OFFPEAK } from './util.js';
+import { api, persistRef, persistReactive, touch, fileName, clock, kilo, kiloInt, ago, shortModel, modelName, modelFamily, say, fail, who, OFFPEAK } from './util.js';
 import { ItemRow } from './item-row.js';
 import { fitGlyphs } from './glyph.js';
 import { useTabs, openOnServer, stays } from './tabs.js';
@@ -21,8 +21,12 @@ import { useReserve, longPress } from './reserve.js';
 import { spentText, pointsVer, SpentPts, rateKey, yuanRate, callPoints, AVG_CALL, FEN, splitPop } from './points.js';
 import { useUsers } from './users.js';
 import { GrantPlan } from './plan.js';
+import { useStats, LineChart, BarChart } from './stats.js';
 import { useDevices } from './devices.js';
 import { usePersonas } from './personas.js';
+import { useTodos } from './todos.js';
+import { useReviewBoard, ReviewBoard } from './review-board.js';
+import { useVoice } from './voice.js';
 import { useAvatar } from './avatar.js';
 import { CtxViews, useCtxMap } from './ctx-ring.js';
 import { useBack } from './back.js';
@@ -36,13 +40,15 @@ const filterLabels = { tool: '工具', system: '系统消息', attachment: '附�
 // 行里的字和盖在上面的药丸由样式按 --pull 挪（style.css「往右划置顶」），松手放过渡弹回；拖过的那一下松手不算点开会话。
 // 绑定的值是切换函数，后端不认置顶时给 null，不起手
 const PIN_AT = 72;
+// 侧边栏正在跟手拖或松手后正在滑（app.js 里 sd 不空）：这时按下去是接住侧边栏，往右拖也是拖侧边栏，行不起手置顶。setup 里换成真的
+let sideBusy = () => false;
 const pinSwipe = {
   mounted(el, binding) {
     el._pin = binding.value;
     let x0 = 0, y0 = 0, mode = '', armed = false, scroller = null, quiet = 0;
     const pull = v => el.style.setProperty('--pull', `${v}px`);
     el.addEventListener('touchstart', e => {
-      mode = el._pin && e.touches.length === 1 ? 'wait' : '';
+      mode = el._pin && e.touches.length === 1 && !sideBusy() ? 'wait' : '';
       x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
     }, { passive: true });
     el.addEventListener('touchmove', e => {
@@ -85,7 +91,7 @@ const pinSwipe = {
 };
 
 createApp({
-  components: { ItemRow, ContextMenu, TagPicker, UiSelect, XxlbLive2d, XxlbCredit, XxlbThemes, AcctTag, SpentPts, QuotaBar, QuotaSegs, CtxViews, GrantPlan },
+  components: { ItemRow, ContextMenu, TagPicker, UiSelect, XxlbLive2d, XxlbCredit, XxlbThemes, AcctTag, SpentPts, QuotaBar, QuotaSegs, CtxViews, GrantPlan, LineChart, BarChart, ReviewBoard },
   setup() {
     // 设置全都记在这台设备的浏览器里，改了自动写回去
     // 思考默认不显示：CC 不把真正的思考写进记录，这些块基本是空的
@@ -369,7 +375,8 @@ createApp({
 
     // 手机上往右划打开侧边栏（手不用去够左上角的两条横线）。
     // 默认一次只开一个会话，没有标签页可切；开了底部标签页的按起手位置分开，见下面。
-    // 宽松一点：哪里起手都行、不用贴着屏幕边，划过 50px、方向偏水平（竖着走的不到横着走的七成）、0.8 秒内就算。
+    // 宽松一点：哪里起手都行、不用贴着屏幕边，方向偏水平（竖着走的不到横着走的七成）。窄屏上是跟手拉出来的（startSideDrag，见下面）；
+    // 宽屏常驻的收着时划过 50px、0.8 秒内就算（swipeDir）。
     // 在输入框、弹出的卡片和下拉、本身能左右滚的地方（代码块、宽表格）上划不算，那些地方的手指要留给它们自己。
     // 开了底部标签页时往右划两头都要，按起手的位置分开：输入框顶边往下（输入框、底下那排小标签）
     // 左右划切标签页，上面和中间往右划打开侧边栏、往左划不管。标签页栏本身不算（它不在对话区里，触摸到不了这里），留给它自己横滚。
@@ -408,10 +415,33 @@ createApp({
       swipeStart(e);
       if (pager && !pager.drag && swipe && canDragTabs()) grab(e);
     };
-    // 侧边栏（抽屉的时候）里往左划收起，和往右划打开对称；宽屏常驻的只有点两条横线才收
-    const onSideTouchStart = swipeStart;
+    // 侧边栏（抽屉的时候）里往左拖收起，和往右拖拉出一样跟手（见下面 startSideDrag）：侧边栏跟着手指往回缩，
+    // 松手按还露着多少定，过一半留着、不到一半收起，甩一下按甩的方向。在右边压暗的那条缝上起手也算；往右拖留给会话行的置顶（pinSwipe）。
+    // 宽屏常驻的只有点两条横线才收。松手后还在滑的时候手指一按就当场接住（grabSide），往左往右都能接着拖
+    const onSideTouchStart = e => {
+      swipeStart(e);
+      if (sd?.anim && swipe && e.touches.length === 1) grabSide(e);
+    };
+    // 接住那一下松手以后浏览器还会补一个点按，别让它落到压暗处（收起）或者会话行（打开会话）上
+    let sideQuiet = 0;
+    const onSideClickCapture = e => {
+      if (Date.now() - sideQuiet < 400) { e.preventDefault(); e.stopPropagation(); }
+    };
+    const onSideTouchMove = e => {
+      if (!swipe || swipe.noDrag || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (sd?.drag) return sideMove(t.clientX);
+      const dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
+      if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+      if (dx >= 0 || Math.abs(dy) >= Math.abs(dx) * 0.7 || sd || sessions.sideWide.value || !sessions.sideOpen.value
+          || !startSideDrag(e.currentTarget.querySelector('.side-scroll'), t.clientX, true)) swipe.noDrag = true;
+    };
     const onSideTouchEnd = e => {
-      if (swipeDir(e) < 0 && !sessions.sideWide.value) sessions.sideOpen.value = false;
+      if (sd?.drag) sideRelease(e.changedTouches[0].clientX);
+      swipe = null;
+    };
+    const onSideTouchCancel = () => {
+      if (sd?.drag) sideRelease(0, true);
       swipe = null;
     };
     // 跟手翻页（像手机桌面一样能中途接住、能连着快速翻）。
@@ -422,7 +452,8 @@ createApp({
     // 弹簧没停稳时手指一按就当场接住、接着拖（grab），连着甩几下就一页页往后翻。只有停稳的那一页才真正 select 过去
     // （中途路过的只露脸，不切、不加载），翻完撤掉手写的样式（finish）。
     // 不卡的几样做法：
-    // - 触摸移动、取消的监听是被动的，只在有标签页栏时挂上（index.html 里 v-on="keepTabs ? dragOn : {}"），没开底部标签页时一点不多花；
+    // - 触摸移动、取消的监听是被动的，只在有标签页栏或者窄屏（要跟手拉侧边栏）时挂上（index.html 里 v-on="keepTabs || !sideWide ? dragOn : {}"），
+    //   宽屏又没开底部标签页时一点不多花；
     //   拖起来以后挡住上下滚动靠给当前页临时写 overflow-y: hidden，不靠 preventDefault
     // - 露着的页面标成 will-change: transform，各自一层由合成器挪，不重绘；拖的时候位置一帧只写一次（requestAnimationFrame）
     // - 从越过 10px 门槛那一刻起算位移，页面不会一开始就跳一下
@@ -430,6 +461,128 @@ createApp({
     let pager = null;
     const SPRING = 0.02;     // 弹簧的角频率（每毫秒）：临界阻尼，两三百毫秒停稳
     const canDragTabs = () => sessions.keepTabs.value && !sessions.sideOpen.value && swipe.low;
+    // 往右划拉出侧边栏是跟手的：横着往右拖起来以后，侧边栏从左边跟着手指露出来，拖多远露多少，压暗的那层跟着加深；
+    // 松手按露出来的多少定：过了一半就打开，不到一半收回去；轻轻一甩（过 0.3px/ms）按甩的方向算，原来那样短短一划照样能打开。
+    // 只在窄屏的抽屉上这样，宽屏常驻的往右划照旧直接打开。拖的时候靠 sideDrag 让侧边栏先露出来，松手定了打开才置上 sideOpen，
+    // 收回去的那一下不算打开过，返回键的历史不多记一步。位置写在侧边栏那几层的行内样式上，盖过 side-in 的进场样式，一帧只写一次；
+    // 拖的时候同跟手翻页一样给当前页临时写 overflow-y: hidden，页面不跟着上下滚。
+    // 慢慢拖不发抖：侧边栏、压暗、阴影都标上 will-change 各占一层，由合成器挪、调透明度，
+    // 不每帧重画（不标时拖 1.2 秒重画 144 次，tests/scratchpad/trace_side_drag.py 量的）；拖的时候不去取最近的会话，
+    // 免得结果半路回来、重画列表卡几帧，松手打开时 openSide 再取；对话区是 touch-action: pan-y（style.css），横着起手浏览器不当成滚动接走。
+    // 阴影是单独一层 .side-glow，透明度跟着露出的比例走：收着时侧边栏挪出屏幕，阴影不会在屏幕边上多留一条再一下子没了
+    const sideDrag = ref(false);
+    // 正在拖（drag）或松手后正在滑到位（anim）的这一下。滑的时候手指按在侧边栏、压暗处上就接住（不然收回的半路没法往右拉）；
+    // 收起的滑到屏幕外就清空、整层放开触摸（pointer-events: none），手指马上落回对话区能再拉出来，不等 side-in 的退场放完
+    let sd = null;
+    let hiding = null, hideTimer = 0;   // 收起滑完、等退场放完再撤行内样式的那一下
+    sideBusy = () => !!sd;
+    const SIDE_MS = 260;   // 和 style.css 里 side-in 的时长一样
+    const canDragSide = dx => dx > 0 && !sd && !sessions.sideWide.value && !sessions.sideOpen.value && !(lowTabs() && swipe.low);
+    function sideReset(g) {
+      if (g.side) Object.assign(g.side.style, { transition: '', transform: '', willChange: '' });
+      for (const el of [g.shade, g.glow]) if (el) Object.assign(el.style, { transition: '', opacity: '', willChange: '' });
+      if (g.wrap) g.wrap.style.pointerEvents = '';
+    }
+    function stopHiding() {
+      clearTimeout(hideTimer);
+      hideTimer = 0;
+      hiding = null;
+    }
+    // 退场还没放完又点两条横线打开了：马上撤掉收着时的样式，照常放进场。
+    // sessions 在下面才建好，watch 会当场读一次 getter，所以等 setup 跑完再挂（直接挂会让整个页面起不来）
+    nextTick(() => watch(() => sessions.sideOpen.value, v => {
+      if (v && hiding && !sd) { sideReset(hiding); stopHiding(); }
+    }));
+    // closing：在开着的侧边栏上往左拖收起。它本来就显示着，当场找到、量好宽度，从整张露着（off 取宽度）起算；
+    // 拖的时候同样置上 sideDrag，松手定了收起、sideOpen 先落下，侧边栏也照样留着滑完再藏。返回假就是没找到侧边栏，这一下不拖
+    function startSideDrag(page, x, closing) {
+      if (!closing) sessions.sideView.value = 'main';
+      stopHiding();   // 上一下的退场还没放完：样式归这一下管，不再撤
+      sideDrag.value = true;
+      // 起手越过门槛的这一点也记进速度历史：短短一甩可能只再来一两个触摸点，不记它就算不出速度、甩不动
+      sd = { drag: true, closing, x0: x, page, off: closing ? Infinity : 0, w: 0, hist: [{ x, t: performance.now() }], frame: 0, side: null, shade: null, glow: null };
+      if (closing) {
+        sideRender();
+        if (!sd.side) { sd = null; sideDrag.value = false; return false; }
+        sd.off = sd.w;
+      }
+      if (page) page.style.overflowY = 'hidden';
+      return true;
+    }
+    // 拉出来时侧边栏是 sideDrag 置上以后才显示的，第一帧再找它、量宽度
+    function sideRender() {
+      const g = sd;
+      g.frame = 0;
+      if (!g.side) {
+        g.side = document.querySelector('.side-wrap > .side');
+        g.shade = document.querySelector('.side-wrap > .side-shade');
+        g.glow = g.side?.querySelector(':scope > .side-glow');
+        if (!g.side || !g.shade || !g.glow) return void (g.side = null);
+        g.wrap = g.side.parentElement;
+        g.wrap.style.pointerEvents = '';
+        g.w = g.side.offsetWidth || 1;
+        Object.assign(g.side.style, { transition: 'none', willChange: 'transform' });
+        for (const el of [g.shade, g.glow]) Object.assign(el.style, { transition: 'none', willChange: 'opacity' });
+      }
+      const off = Math.min(g.off, g.w);
+      g.side.style.transform = `translateX(${off - g.w}px)`;
+      g.shade.style.opacity = g.glow.style.opacity = off / g.w;
+    }
+    // 滑到半路被接住：停在这一帧的位置（读过渡算到哪儿了），撤掉过渡，这一下直接算拖，往哪边都跟（free），不用再过 10px 门槛
+    function grabSide(e) {
+      const g = sd, x = e.touches[0].clientX;
+      clearTimeout(g.timer);
+      g.anim = false;
+      g.off = Math.max(0, Math.min(g.w, g.w + new DOMMatrix(getComputedStyle(g.side).transform).m41));
+      for (const el of [g.side, g.shade, g.glow]) el.style.transition = 'none';
+      sideRender();
+      Object.assign(g, { drag: true, free: true, grabbed: true, x0: x, off0: g.off, hist: [{ x, t: performance.now() }],
+                         page: e.currentTarget.querySelector('.side-scroll') });
+      if (g.page) g.page.style.overflowY = 'hidden';
+      sideDrag.value = true;
+    }
+    function sideMove(x) {
+      const g = sd, now = performance.now();
+      g.off = g.free ? Math.max(0, Math.min(g.w, g.off0 + x - g.x0))
+        : g.closing ? Math.max(0, g.w + Math.min(0, x - g.x0)) : Math.max(0, x - g.x0);
+      g.hist.push({ x, t: now });
+      while (g.hist.length > 2 && now - g.hist[0].t > 100) g.hist.shift();
+      if (!g.frame) g.frame = requestAnimationFrame(sideRender);
+    }
+    // 松手：定下打开还是收回，从手指停下的地方滑过去；cancel 是被系统收走的触摸，回到起手时的样子（拉出来的收回，收起的留着，接住的停到近的那头）
+    function sideRelease(x, cancel) {
+      const g = sd, now = performance.now();
+      g.drag = false;
+      if (g.page) g.page.style.overflowY = '';
+      if (g.frame) cancelAnimationFrame(g.frame);
+      sideRender();
+      if (g.grabbed) sideQuiet = Date.now();
+      const h = g.hist.find(q => now - q.t <= 80) || g.hist[g.hist.length - 1];
+      const vx = h && now - h.t > 0 ? (x - h.x) / (now - h.t) : 0;
+      const open = cancel && !g.free ? !!g.closing : !cancel && Math.abs(vx) > 0.3 ? vx > 0 : g.off > g.w / 2;
+      // 从收着拉出来的才走 openSide（从会话那一页看起）；收到半路又拉回来的直接置回去，还停在原来那页
+      if (open && !sessions.sideOpen.value) {
+        if (g.free || g.closing) sessions.sideOpen.value = true;
+        else sessions.openSide();
+      }
+      if (!open && sessions.sideOpen.value) sessions.sideOpen.value = false;
+      if (!g.side) { sideDrag.value = false; sd = null; return sideReset(g); }
+      const ms = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : SIDE_MS;
+      void g.side.offsetWidth;   // 先让手指停下的那个位置生效，下面换上过渡才从这里滑过去
+      Object.assign(g.side.style, { transition: `transform ${ms}ms cubic-bezier(0.2, 0.7, 0.2, 1)`, transform: open ? 'translateX(0)' : 'translateX(-100%)' });
+      for (const el of [g.shade, g.glow]) Object.assign(el.style, { transition: `opacity ${ms}ms ease`, opacity: open ? 1 : 0 });
+      g.anim = true;
+      g.timer = setTimeout(() => {
+        g.anim = false;
+        sideDrag.value = false;
+        if (sd === g) sd = null;
+        if (open) return sideReset(g);   // sideOpen 已经接上，直接撤样式
+        // 收起的：滑到屏幕外就放开触摸；v-show 还要放一遍 side-in 的退场，放完、藏起来以后才撤样式，不然撤掉的那一帧会闪出整张侧边栏
+        g.wrap.style.pointerEvents = 'none';
+        hiding = g;
+        hideTimer = setTimeout(() => { sideReset(g); stopHiding(); }, SIDE_MS + 40);
+      }, ms);
+    }
     function pageEl(k) {
       const tab = tabs.value[pager.i0 + k];
       if (!tab) return null;
@@ -489,11 +642,15 @@ createApp({
     const onTouchMove = e => {
       if (!swipe || swipe.noDrag || e.touches.length !== 1) return;
       const t = e.touches[0];
+      if (sd?.drag) return sideMove(t.clientX);
       if (!pager?.drag) {
         const dx = t.clientX - swipe.x, dy = t.clientY - swipe.y;
         if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
-        // 竖着走的、这里不能切标签页的（还在翻却没接住的也是）：这一下不拖（松手时照旧看是不是开侧边栏、往下拉）
-        if (Math.abs(dy) >= Math.abs(dx) * 0.7 || pager || !canDragTabs()) { swipe.noDrag = true; return; }
+        if (Math.abs(dy) >= Math.abs(dx) * 0.7) { swipe.noDrag = true; return; }
+        // 窄屏上往右拖、这里不切标签页：拉出侧边栏，从越过门槛那一刻起算
+        if (canDragSide(dx)) { startSideDrag(e.currentTarget, t.clientX); return; }
+        // 竖着走的（上面）、这里不能切标签页的（还在翻却没接住的也是）：这一下不拖（松手时照旧看是不是往下拉）
+        if (pager || !canDragTabs()) { swipe.noDrag = true; return; }
         startPager(e.currentTarget);
         pager.drag = { x0: t.clientX, p0: 0, hist: [] };
       }
@@ -553,6 +710,7 @@ createApp({
       if (pager === g) pager = null;
     }
     const onTouchCancel = () => {
+      if (sd?.drag) sideRelease(0, true);
       if (pager?.drag) {
         pager.drag.hist = [];   // 被系统收走的触摸不算甩
         release(pager.drag.x0);
@@ -561,12 +719,17 @@ createApp({
     };
     const onTouchEnd = e => {
       if (!swipe) return;
+      if (sd?.drag) {
+        swipe = null;
+        return sideRelease(e.changedTouches[0].clientX);
+      }
       if (pager?.drag) {
         swipe = null;
         return release(e.changedTouches[0].clientX);
       }
+      // 宽屏常驻的收着时往右划直接打开；窄屏的抽屉由上面跟手拉出来，这里不管
       const tabZone = lowTabs() && swipe.low;   // 开了底部标签页、在输入框往下起的手：只切标签页
-      if (!tabZone && !sessions.sideOpen.value && swipeDir(e) > 0) {
+      if (sessions.sideWide.value && !tabZone && !sessions.sideOpen.value && swipeDir(e) > 0) {
         swipe = null;
         return sessions.openSide();
       }
@@ -576,6 +739,7 @@ createApp({
       // 切标签页全由上面的跟手翻页管（没有标签页栏时后台留着的几个看不见，canDragTabs 不让拖）；
       // 在顶上往下拉：页面滚不动时没有滚动事件，靠这一下去补更早的；手上这批底下卸掉过时，在底下往上推同样去接后面的
       const el = e.currentTarget;
+      if (el.classList.contains('todo-page')) return;   // 待办页借这套手势只为往右划拉出侧边栏，上下拉不去补对话
       if (dy > 60 && Math.abs(dx) < dy && el.scrollTop < 600) minimap.fetchEarlier();
       else if (dy < -60 && Math.abs(dx) < -dy && el.scrollHeight - el.scrollTop - el.clientHeight < 600) minimap.fetchLater();
     };
@@ -678,6 +842,16 @@ createApp({
     };
     const quota = useQuota({ current, readonly, fallback: fallbackAccount });
     const people = useUsers({ current, openTab, view: sessions.ovView, promoTag: quota.promoTag });   // 身份、登录注册、账本、可见范围
+    // 账号页上的余额曲线、我的号、用量小图和用量统计页（stats.js）
+    const stats = useStats({ accounts: sessions.accounts, quota, sideWide: sessions.sideWide });
+    // 每次打开账号页取一次（各自一分钟或半分钟内不重取）；额度要现取，我的号的血条照它画
+    watch(() => sessions.sideOpen.value && sessions.sideView.value === 'me' && !!people.me.name, v => {
+      if (!v) return;
+      stats.loadBalance();
+      stats.loadOwned();
+      stats.loadMini();
+      quota.loadQuota();
+    });
     // 预定额度的面板（账号表里右键、手机上长按某个号）
     const reserve = useReserve({ loadQuota: quota.loadQuota, loadMe: people.loadMe });
     // 设备页（devices.js）：哪里解决不了就开个新对话，把问题写进输入框，用户看一眼再发
@@ -686,10 +860,19 @@ createApp({
       const tab = sessions.openFresh({ blank: true });
       if (!tab) return;
       tab.draft = text;
+      tab.todoIds = null;   // 这个标签页以前从待办页写过话又清空了：这次不是从待办开出
       nextTick(chat.autoGrow);
       say('问题写进新对话的输入框了，看一眼没问题就发送', { ms: 4000 });
     }
     const devices = useDevices({ askClaude, meReady: people.meReady });
+    // 待办页（todos.js）：盖住对话区；换到别的会话（侧边栏里挑、搜索、从待办页点会话、发到新会话）就收起
+    const todos = useTodos({ openTab, scroller, openFresh: o => sessions.openFresh(o), afterDraft: () => nextTick(chat.autoGrow) });
+    watch(active, () => todos.closeTodos());
+    // 审稿看板（review-board.js）：自动审稿的会话才有入口，看的是正在看的会话，换到别的会话就收起
+    const review = useReviewBoard();
+    watch(active, () => review.closeReview());
+    // 讯飞语音输入（voice.js）：配过的人输入框里多一个波形按钮，识别出的字写进开口时那个标签页的草稿
+    const voice = useVoice({ current, composerInput: chat.composerInput, autoGrow: chat.autoGrow, globalSettings: sessions.globalSettings });
     // 侧边栏的账号页顶上直接列出自己的设备：每次打开账号页取一次设备列表
     watch(() => sessions.sideOpen.value && sessions.sideView.value === 'me' && people.me.devices,
           v => { if (v) devices.loadDevices(); });
@@ -731,6 +914,14 @@ createApp({
       }
       return { available, unavailable };
     });
+    // 设置页「新会话默认账号」能选的号：被封、订阅到期的不列；共用的 Claude 订阅号（不是 API 号）只有号主能固定，
+    // 别人固定它没有意义，「自动」会挑此刻最宽裕的。已经设了的照旧列着（选择是用户的数据，不悄悄换掉），服务器 set_settings 同一个规矩
+    const defaultChoices = computed(() => sortedAccounts.value.filter(a => {
+      if (a.name === sessions.globalSettings.mine) return true;
+      const exp = quota.quota.expires[a.name];
+      if (a.banned || (exp && exp * 1000 < Date.now())) return false;
+      return familyOf(a.name) !== 'claude' || !!a.api || (people.me.owns || []).includes(a.name);
+    }));
     // 用不了的号（被封、搬走的墓碑）默认收成一行「另有 N 个号用不了」，点了才展开（多的时候十几个，
     // 原来一行行全列着，账号卡片一限高，被挤得只剩一行的反而是能选的号）。看板账号卡片和新会话账号表共用这一个开关
     const deadOpen = ref(false);
@@ -750,8 +941,9 @@ createApp({
       const yuanOf = (model, account) => { const p = callPoints(AVG_CALL, model, account); return p == null ? null : p * FEN / 100; };
       const base = yuanOf(PRICE_MODEL.claude);
       const rows = [], seen = new Set();
-      for (const a of accountGroups.value.available) {
-        const fam = familyOf(a.name), model = relayOf(a.name)?.[0]?.value || PRICE_MODEL[fam] || PRICE_MODEL.claude;
+      // 中转站一个号可以接好几个模型（某个中转站的 Opus 5.5 和 Gemini 4 Argon），每个模型各一行
+      for (const a of accountGroups.value.available) for (const relayModel of relayOf(a.name)?.map(m => m.value) || [null]) {
+        const fam = familyOf(a.name), model = relayModel || PRICE_MODEL[fam] || PRICE_MODEL.claude;
         const key = rateKey(model, a.name);
         if (!key || seen.has(key)) continue;   // 没有单价的号本来就用不了；同一条价的几个号并成一行
         seen.add(key);
@@ -1090,6 +1282,12 @@ createApp({
       }
       menu.open(e, [
         ...head,
+        // 自动审稿的会话才有（跑过 review.py 或选了审稿人设卡）：侧边栏里没开着的先打开、切过去再开看板
+        ...(review.reviewable(tab) ? [{ label: '审稿看板', run: async () => {
+          menu.close();
+          try { tabs.value.includes(tab) ? select(tab) : await openTab(tab.path); } catch (e) { return fail('打开会话', e); }
+          nextTick(review.openReview);
+        } }] : []),
         { label: '重命名', hint: readonly.value ? '仅修改显示名称' : '同步写入会话记录',
           run: () => { menu.close(); openRename(tab); } },
         { label: '编辑标签…', run: () => { menu.close(); sessions.openTagEdit(tab); } },
@@ -1142,13 +1340,13 @@ createApp({
       ]);
     }
     // 侧边栏里的会话：第二行的「⋯」、右键（手机上长按）弹出和右上角「⋯」同一份菜单。
-    // 开着的就用那个标签页；没开着的直接用会话摘要（编号、路径、名字、标签、会话主人都有），不为了弹菜单切过去
+    // 开着的就用那个标签页；没开着的直接用会话摘要（编号、路径、名字、标签、所属用户都有），不为了弹菜单切过去
     // 置顶放在最前面：手机上往右划这一行也行（pinSwipe），电脑上没有划的手势，靠这一项
     const sideMenu = (e, s) => tabMenu(e, tabs.value.find(t => t.id === s.id) || s,
       sessions.sidePins.value ? [{ label: s.pinned ? '取消置顶' : '置顶', run: () => { menu.close(); sessions.togglePin(s); } }] : []);
 
     // 删除会话：只在查看器里删，会话文件不动、能恢复（见服务器 users.py「删掉的会话」）。
-    // 能不能删和服务器 users.delete_why 一个规矩：主人和查看器账号，无主会话只有查看器账号，单用户实例里打开的人就是查看器账号。
+    // 能不能删和服务器 users.delete_why 一个规矩：所属用户和查看器账号，无主会话只有查看器账号，单用户实例里打开的人就是查看器账号。
     // 先弹窗确认；删好了这台设备上开着它的标签页关掉，别的设备、同一会话经别的路径开着的标签页由推送关
     const deleteWhy = tab => (!people.me.multi || people.me.admin ? ''
       : !tab.owner ? '无主会话仅查看器账号可删除'
@@ -1295,33 +1493,209 @@ createApp({
       watch(() => tabs.value.length, freshIfEmpty);
     }));
 
+    // 底下那排小标签放不下时按先后让地方：先把 Remotes 缩成图标加台数（.bar-tools.fit-dev），
+    // 还不够再把花费并回上下文那颗（fit-merge：花费那颗藏起来，上下文的卡片里带回两种视角的切换，toolsMerged），再挤才轮到权限、模型截成省略号。
+    // 量法：每次从不让开始一档一档加，看小标签里的字有没有被截、三段有没有出界；在同一帧里改 class、量，画出来的只有最后那一档。
+    // 宽度变了（ResizeObserver）、小标签里的字变了（MutationObserver：换会话、换模型、台数和花费变了）都重量，一帧最多量一次
+    const toolsMerged = ref(false);
+    {
+      let bar = null, queued = false;
+      const ro = new ResizeObserver(() => soon()), mo = new MutationObserver(() => soon());
+      const attach = () => {
+        if (bar?.isConnected) return true;
+        ro.disconnect(); mo.disconnect();
+        bar = document.querySelector('.bar-tools');
+        if (!bar) return false;
+        ro.observe(bar);
+        mo.observe(bar, { childList: true, subtree: true, characterData: true });
+        return true;
+      };
+      const tight = () => {
+        const chips = bar.querySelector(':scope > .chips');
+        if (!chips) return false;
+        const box = chips.getBoundingClientRect();
+        // 一颗颗看有没有出界（手机上三段拆开排，分段本身没有框）；藏起来的那颗量出来是 0 宽，跳过
+        for (const el of chips.querySelectorAll(':scope > .chip-grp > *')) {
+          const r = el.getBoundingClientRect();
+          if (r.width && (r.left < box.left - 1 || r.right > box.right + 1)) return true;
+        }
+        for (const t of chips.querySelectorAll('.chip > .chip-text')) if (t.scrollWidth > t.clientWidth + 1) return true;
+        return false;
+      };
+      function fit() {
+        queued = false;
+        if (!attach()) return;
+        bar.classList.remove('fit-dev', 'fit-merge');
+        if (tight()) {
+          bar.classList.add('fit-dev');
+          if (tight()) bar.classList.add('fit-merge');
+        }
+        toolsMerged.value = bar.classList.contains('fit-merge');
+      }
+      function soon() {
+        if (queued) return;
+        queued = true;
+        requestAnimationFrame(fit);
+      }
+      watch(() => authGate.value === 'app', on => on && nextTick(soon), { immediate: true });
+    }
+
     const exposed = {
-      authGate, tabs, active, current, setLog, select, close, keepShown, slide, narrow, onTouchStart, onTouchEnd, onSideTouchStart, onSideTouchEnd, pushLost, retrySync,
-      dragOn: { touchmovePassive: onTouchMove, touchcancelPassive: onTouchCancel }, peeks, pagerOn,
+      authGate, tabs, active, current, setLog, select, close, keepShown, slide, narrow, onTouchStart, onTouchEnd, onSideTouchStart, onSideTouchMove, onSideTouchEnd, onSideTouchCancel, onSideClickCapture, pushLost, retrySync,
+      dragOn: { touchmovePassive: onTouchMove, touchcancelPassive: onTouchCancel }, peeks, pagerOn, sideDrag,
       show, filterLabels, follow, mmMine, mdUser, canFull, full, setFull, perf, KEEP_CHOICES, THEMES, theme,
-      ...minimap, ...chat, ...sessions, ...finder, ...quota, ...people, ...reserve, ...devices, ...personas, ...avatar, ctxMap, ctxView, loadCtxMap, jumpCtx, sortedAccounts, accountGroups, deadOpen, waitOpen, waitFolded, priceList, priceRows, priceNum, priceFull, splitPop, rowIn, rowOut, fallbackAccount, effortOf, modelOf, pickFreshAccount, MODE_TIPS, menu, exportMd, exporting,
-      acctFit, acctShown, freshPage, freshGone, toolsTo, modeShort, effortLabel, chipModel, tabMenu, sideMenu, sideStateMenu, sideTagMenu, cardMenu, tagColorMenu, tagStyle, rename, saveRename, trash, confirmDelete, readonly, tabTip, showTabTip, lastSaid,
+      ...minimap, ...chat, ...sessions, ...finder, ...quota, ...people, ...reserve, ...devices, ...personas, ...avatar, ...todos, ...stats, ...voice, ...review,
+      // 侧边栏里挑会话、开新会话、去搜索都先调它：待办页开着就收起（挑的正是眼下这个会话时 active 不变，上面那个 watch 接不到）
+      sideDone: () => { todos.closeTodos(); sessions.sideDone(); }, ctxMap, ctxView, loadCtxMap, jumpCtx, sortedAccounts, accountGroups, defaultChoices, deadOpen, waitOpen, waitFolded, priceList, priceRows, priceNum, priceFull, splitPop, rowIn, rowOut, fallbackAccount, effortOf, modelOf, pickFreshAccount, MODE_TIPS, menu, exportMd, exporting,
+      acctFit, acctShown, toolsMerged, freshPage, freshGone, toolsTo, modeShort, effortLabel, chipModel, tabMenu, sideMenu, sideStateMenu, sideTagMenu, cardMenu, tagColorMenu, tagStyle, rename, saveRename, trash, confirmDelete, readonly, tabTip, showTabTip, lastSaid,
       copyPublicShare, revokePublicShare,
       acctFamily: familyOf,   // 号名写成图标 + 编号（acct-tag.js）时认是哪一家
       acctNumWidth,
-      touch, fileName, clock, kilo, ago, shortModel, spentText, pointsVer, promoTag: quota.promoTag,
+      touch, fileName, clock, kilo, kiloInt, ago, shortModel, spentText, pointsVer, promoTag: quota.promoTag,
       say,   // 模板里直接弹说明（请求大小提醒，手机上没有悬停）
     };
     // 返回键先收起最上面那一层（back.js）。从上往下排：菜单、小标签的卡片（只算手机上点开的，电脑上悬停开关不记步）、
     // 弹窗（.over 那两个压在最上面，其余照 index.html 里的先后、后写的盖在先写的上面）、侧边栏的设置页和账号页、窄屏上的侧边栏抽屉
     const ex = exposed, mask = (o, close = () => (o.open = false)) => ({ open: () => !!o.open, close });
-    const back = useBack([
+    const layers = [
       { open: () => !!menu.menu.items.length, close: menu.close },
       { open: () => touch && !!sessions.openDd.value, close: () => (sessions.openDd.value = '') },
       { open: () => !!(ex.rv.open && ex.rv.confirm), close: () => ex.rv.busy || (ex.rv.confirm = false) },
-      mask(ex.ledger), mask(ex.priceList), mask(ex.traffic), mask(ex.admin), mask(ex.board), mask(ex.dev, ex.closeDevices),
+      mask(ex.ledger), mask(ex.priceList), mask(ex.traffic), mask(ex.admin), mask(ex.board), mask(ex.us), mask(ex.dev, ex.closeDevices),
       { open: () => !!ex.pc.ask, close: () => ex.answerAsk(false) }, mask(ex.pc, ex.closePersonas),
-      mask(ex.rv), mask(ex.pw), mask(ex.newChat), mask(ex.search), mask(ex.tagEdit), mask(ex.trash), mask(ex.rename), mask(ex.info),
+      mask(ex.rb), mask(ex.rv), mask(ex.pw), mask(ex.newChat), mask(ex.search), mask(ex.tagEdit), mask(ex.trash), mask(ex.rename), mask(ex.info),
       mask(ex.overview), mask(ex.picker),
       { open: () => sessions.sideOpen.value && sessions.sideView.value === 'set', close: () => (sessions.sideView.value = 'me') },
       { open: () => sessions.sideOpen.value && sessions.sideView.value !== 'main', close: () => (sessions.sideView.value = 'main') },
       { open: () => sessions.sideOpen.value && !sessions.sideWide.value, close: () => (sessions.sideOpen.value = false) },
-    ]);
+      { open: () => todos.td.open, close: todos.closeTodos },   // 待办页压在侧边栏抽屉底下、对话区上面
+    ];
+    const back = useBack(layers);
+    // 底下那一截跟着手指走：输入框、小标签那一排、底部标签页栏和回到顶部 / 底部，就像接在屏幕底部内容再往下的东西，
+    // 竖着拖的时候顺着手指一起动，一帧跟一帧：手指往下（往上翻以前的内容）就跟着往下走出屏幕，手指往上（往回看最新的）就跟着冒出来，
+    // 冒出来比手指快一倍，往回滚容易出来；松手时停在半路的，照手指最后的走向落定（Web Animations，0.22 秒），之后不自己再动。
+    // 点一下屏幕切换：露着就收起，收着就回来（点到链接、按钮、能点开的气泡这些不算）。顶上那几颗圆按钮不动。只给触屏。
+    // 往下最多走整截的高度，也不超过离对话末尾还有多远：输入框和小标签那一排在对话区这个滚动区里，挪出末尾的那截会撑大可滚动的高度
+    // （停在最底下时会变成「没到底」，跟着新消息往下走就断了）。所以藏着时快到末尾就被末尾顶上来、跟着内容露出来，到了最底下就是完整的样子
+    // （点回到底部、跟着新消息走都一样）；在末尾附近点一下收起，能挪多少挪多少，剩下的原地淡掉，往下拖到整截都出了屏幕再撤掉淡掉。
+    // 新会话页、开着菜单弹窗侧边栏这些层、输入框报错、正在打字时不跟手，已经挪走的落回原处；焦点进了输入框也落回，换标签页直接回原处。
+    // 不做停几秒自己收、按滚动方向整块收放：出现和消失会拽走注意力，逻辑也复杂
+    if (touch) {
+      // REVEAL：往上冒出来时按手指位移的几倍走（一比一往回滚很难出来）；往下藏照旧一比一，看着像接在内容底下。TAP_MS：按多久以内算点一下
+      const root = document.documentElement, SLOP = 8, GAP = 8, REVEAL = 2, TAP_MS = 400, EASE = 'cubic-bezier(0.2, 0.7, 0.2, 1)';
+      const reduce = matchMedia('(prefers-reduced-motion: reduce)');
+      // T：眼下往下挪了多少；F：原地淡掉了（末尾附近点了收起、挪不出去的时候）；hid：落定在藏起来那头（之后跟着离末尾的距离走）；
+      // full：整截有多高；els：跟着动的几样和各自最多挪多少；coast：手指滚动（连同松手后的惯性）最后动的时刻，按住正在惯性滚的页面让它停下不算点一下
+      let T = 0, F = false, hid = false, full = 0, els = [], g = null, coast = -1e9;
+      const typing = () => root.classList.contains('kb-lift') || root.classList.contains('kb-freeze')
+        || (!narrow.value && !!document.activeElement?.closest?.('.composer'));
+      const stay = () => authGate.value !== 'app' || !current.value || !!current.value.fresh || !!current.value.failed
+        || !!current.value.chatError || layers.some(l => l.open());
+      // 正在看的会话的输入框（或只能看时那行说明）、小标签那一排、标签页栏一起走整截；回到顶部 / 底部只走到离窗口底边 16px
+      const measure = () => {
+        const log = scroller.value, wrap = log?.closest('.logwrap');
+        const c = log?.querySelector(':scope > .composer'), s = log?.querySelector(':scope > .tools-slot');
+        full = (c?.offsetHeight || 0) + (s?.offsetHeight || 0) + GAP;   // 多走 GAP，输入框的阴影也出去
+        const cap = Math.max(0, full - GAP - 4);
+        els = [c, s, document.querySelector('.tabbar')].filter(Boolean).map(el => ({ el, cap: Infinity }))
+          .concat([...(wrap ? wrap.querySelectorAll(':scope > .to-top, :scope > .to-bottom') : [])].map(el => ({ el, cap })));
+      };
+      const room = () => {
+        const log = scroller.value;
+        return log ? Math.max(0, Math.min(full, Math.floor(log.scrollHeight - log.scrollTop - log.clientHeight))) : 0;
+      };
+      // 挪到 v、淡不淡（f）；anim 时用 Web Animations 从眼下的样子过去。原地淡掉只给输入框、小标签那一排和标签页栏，
+      // 回到顶部 / 底部自己按滚动淡入淡出，不碰它们的透明度
+      const put = (v, anim = false, f = F) => {
+        const was = T, wasF = F, go = anim && !reduce.matches;
+        T = v; F = f;
+        for (const { el, cap } of els) {
+          const a0 = Math.min(was, cap), a1 = Math.min(v, cap);
+          for (const a of el.getAnimations()) if (a.id === 'bar-y' || (a.id === 'bar-o' && wasF !== f)) a.cancel();
+          el.style.translate = a1 ? `0 ${a1}px` : '';
+          if (go && a0 !== a1) el.animate({ translate: [`0 ${a0}px`, `0 ${a1}px`] }, { duration: 220, easing: EASE, id: 'bar-y' });
+          if (cap !== Infinity || wasF === f) continue;
+          el.style.opacity = f ? '0' : '';
+          el.style.pointerEvents = f ? 'none' : '';
+          if (go) el.animate({ opacity: [wasF ? 0 : 1, f ? 0 : 1] }, { duration: 220, easing: 'ease', id: 'bar-o' });
+        }
+      };
+      const home = () => { hid = false; if (T || F) put(0, true, false); };
+      // 点一下切换：露着就收起，收着就回来。离末尾不够整截高时挪到末尾为止，剩下的原地淡掉
+      const toggle = () => {
+        if (F || (full && T >= full)) return home();
+        measure();
+        const max = room();
+        hid = true;
+        put(max, true, max < full);
+      };
+      // 点到能点的东西（链接、按钮、输入框、图片，能点开的气泡、工具卡片这些样式上是手形指针）就只做它自己的事，不切换
+      const tappable = el => !!el.closest?.('a, button, input, textarea, select, label, summary, video, audio, img, [role="button"], [contenteditable], .composer, .tools-slot')
+        || getComputedStyle(el).cursor === 'pointer';
+      const opt = { capture: true, passive: true };
+      addEventListener('touchstart', e => {
+        g = null;
+        const log = scroller.value;
+        if (e.touches.length !== 1 || !log?.contains(e.target) || stay() || typing()) return;
+        // 落定到一半又按下：从眼下的位置接着跟手
+        const el = els[0]?.el;
+        if (el?.getAnimations().some(a => a.id === 'bar-y')) put(parseFloat(getComputedStyle(el).translate.split(' ')[1]) || 0);
+        g = { x: e.touches[0].clientX, y: e.touches[0].clientY, last: 0, y1: 0, on: false, track: [],
+              t0: e.timeStamp, stop: e.timeStamp - coast < 100, target: e.target };
+      }, opt);
+      addEventListener('touchmove', e => {
+        if (!g || e.touches.length !== 1) return;
+        const t = e.touches[0];
+        if (!g.on) {
+          const dx = t.clientX - g.x, dy = t.clientY - g.y;
+          if (Math.abs(dx) < SLOP && Math.abs(dy) < SLOP) return;
+          if (Math.abs(dy) <= Math.abs(dx)) { g = null; return; }   // 横着划（切标签页、开侧边栏、滚代码块）不管
+          g.on = true; g.last = g.y1 = t.clientY;   // 从越过门槛那一刻起算
+          measure();
+          return;
+        }
+        const d = t.clientY - g.last;   // 手指往下为正：往上翻以前的内容，底下这截跟着往下走
+        g.last = t.clientY;
+        g.track.push([e.timeStamp, t.clientY]);   // 最近 0.1 秒的手指位置，松手时看往哪走
+        while (g.track.length > 2 && e.timeStamp - g.track[0][0] > 100) g.track.shift();
+        if (!d) return;
+        if (F && d < 0) put(T, true, false);   // 淡掉的时候往上拖：先淡回来，再跟着手指冒
+        const v = Math.max(0, Math.min(room(), T + (d < 0 ? d * REVEAL : d)));
+        if (v !== T || (F && v >= full)) put(v, false, F && v < full);   // 淡掉的往下拖到整截都出了屏幕，撤掉淡掉
+      }, opt);
+      const lift = e => {
+        if (!g || e.touches.length) return;
+        const { on, track, y1, t0, stop, target } = g;
+        g = null;
+        if (!on) {
+          if (e.type === 'touchend' && !stop && e.timeStamp - t0 < TAP_MS && !tappable(target)) toggle();   // 点一下切换
+          return;
+        }
+        coast = e.timeStamp;
+        const max = room();
+        if (T <= 0 && !F) { hid = false; return; }
+        if (T >= max) { hid = true; return; }   // 走到头了（或者被末尾顶着），就停在这儿
+        // 照手指最后 0.1 秒往哪走落定（只看最后一下，抬手时手指的小回弹会带偏）；最后没动就看这一下整体往哪走，再不行落到近的那头
+        const end = track.length ? track[track.length - 1][1] : y1;
+        const recent = track.length > 1 ? end - track[0][1] : 0, dir = Math.abs(recent) > 2 ? Math.sign(recent) : Math.sign(end - y1);
+        hid = dir > 0 || (!dir && T > max / 2);
+        put(hid ? max : 0, true);
+      };
+      addEventListener('touchend', lift, opt);
+      addEventListener('touchcancel', lift, opt);
+      // 手指滚动和松手后接着的惯性记进 coast（跟着新消息往下走这类程序滚的不算）；藏着时惯性还在滚、程序滚（回到底部、跟着新消息走）：
+      // 快到末尾被末尾顶上来，离开末尾再跟着回到藏着的位置
+      addEventListener('scroll', e => {
+        if (e.target !== scroller.value) return;
+        if (g?.on || e.timeStamp - coast < 150) coast = e.timeStamp;
+        if (!hid || g?.on) return;
+        const v = room();
+        if (v !== T || (F && v >= full)) put(v, false, F && v < full);
+      }, opt);
+      document.addEventListener('focusin', e => { if (e.target.closest?.('.composer, .tools-slot')) home(); });
+      watch(stay, v => { if (v) home(); });
+      watch(active, () => { hid = false; put(0, false, false); els = []; full = 0; });
+    }
     // 全屏时按返回键，浏览器先拿去退出全屏，网页收不到这次返回（没有 popstate），也拦不住（实测）。
     // 所以把开着全屏开关时的退出当成一次返回：开着弹窗、侧边栏这些就收起最上面那层，下一次点页面回到全屏
     // （浏览器只认用户亲手点的那一下，没法当场回去，中间会露一下状态栏）；什么都没开（会话区）就只是退出全屏，点一下页面照样回去。

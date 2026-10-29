@@ -55,11 +55,13 @@
        本机偏好里再开了「垂直标签页」（sessions.sideTabs）就不在底下，改成竖着列在侧边栏「最近」上面（.side-tabs） -->
   <!-- clear：正看着还没说话的新会话页，手机上栏底透明、露出底下的主题色云（和 .fresh-clouds 的 gone 同一个条件） -->
   <!-- me-gap：宽屏收起侧边栏时左下角有头像（.rail-me），栏左边让开它 -->
+  <!-- see-through：看着普通会话时栏底透明，和小标签那一排的渐隐连成一片（style.css 最后 .tabbar.see-through）；新会话页上那一排没有渐隐，照旧 -->
   <div v-if="keepTabs && !sideTabs" class="tabbar" :class="{ clear: current?.fresh && !current.busy && !current.pending.length,
-                                                'me-gap': sideWide && !sideOpen && me.name }">
+                                                'me-gap': sideWide && !sideOpen && me.name, 'see-through': !current?.fresh }">
     <nav class="tabs">
       <!-- 标签页上只写标题；花费、最近一句话放在悬停卡片里（tabTip），不用浏览器自带的提示（路径 用户反馈不写了） -->
-      <button v-for="t in tabs" :key="t.id" class="tab" :class="{ on: t.id === (pagerOn || active), fresh: t.fresh }" @click="select(t)"
+      <!-- 开着待办页时没有哪个标签是当前的（待办页不占标签，和会话平级）；点哪个都是收起待办页、切到它，点底下那个也一样 -->
+      <button v-for="t in tabs" :key="t.id" class="tab" :class="{ on: t.id === (pagerOn || active) && !td.open, fresh: t.fresh }" @click="closeTodos(); select(t)"
               v-longpress="e => tabMenu(e, t)" @mouseenter="showTabTip($event, t)" @mouseleave="tabTip.tab = null">
         <!-- 点和侧边栏「最近」同一套（sessions.js 的 sideDot：干活闪绿、停在额度上橙、出错红、未读绿，闲着不画）。
              点不放在文字那一行里，单独占一格（dot-slot），按药丸的实际高度和左端半圆同心（style.css 的 .dot-slot） -->
@@ -71,7 +73,7 @@
       </button>
     </nav>
     <!-- 左键在家目录开新会话，右键先选文件夹（以前悬停有一句说明，用户反馈不弹） -->
-    <button class="tab-new" aria-label="新会话" @click="openFresh()" @contextmenu.prevent="openPicker()">
+    <button class="tab-new" aria-label="新会话" @click="closeTodos(); openFresh()" @contextmenu.prevent="openPicker()">
       <span class="plus">+</span>
     </button>
   </div>
@@ -105,8 +107,9 @@
     <!-- 新建会话：和侧边栏里的「新会话」一样（纸上一支笔，Lucide 图标库的 square-pen，ISC 许可，24 格画布）。
          新会话的入口任何时候只有一处：宽屏侧边栏开着时只有侧边栏顶上那颗药丸，这里不画；
          宽屏收着时留在药丸里那支笔原来的位置（rail）；窄屏在右上角，已经在新会话页上时不画（右上角只剩头像） -->
-    <button v-if="!readonly && !(sideWide && sideOpen) && !(!sideWide && current?.fresh)" class="icon-btn new-btn" :class="{ rail: sideWide }" aria-label="新会话"
-            @click.stop="openFresh()">
+    <!-- 待办页（td.open）盖在新会话页上时照样要这颗：待办页不是新会话页 -->
+    <button v-if="!readonly && !(sideWide && sideOpen) && !(!sideWide && current?.fresh && !td.open)" class="icon-btn new-btn" :class="{ rail: sideWide }" aria-label="新会话"
+            @click.stop="closeTodos(); openFresh()">
       <svg viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
         <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>
     </button>
@@ -119,14 +122,19 @@
     <button v-if="sideWide && !sideOpen && me.name" class="icon-btn rail-me" :aria-label="`账号：${me.name}`" @click.stop="openMe()">
       <i class="side-avatar"><img v-if="avatarSrc" :src="avatarSrc" alt=""><template v-else>{{ me.name.slice(0, 1) }}</template></i>
     </button>
+    <!-- 审稿看板（review-board.js）：只有自动审稿的会话（跑过 review.py、或选了审稿人设卡）才有这颗，挨在「⋯」左边；别的会话不画 -->
+    <button v-if="current && !td.open && reviewable(current)" class="icon-btn review-btn" aria-label="审稿看板" @click.stop="openReview()">
+      <svg class="ico24" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1"/><path d="M9 12.5l2 2 4-4.5"/></svg>
+    </button>
     <!-- 会话的操作（重命名、标签、导出、删除，和右键标签页一样）放在右上角竖着的「⋯」里 -->
-    <button v-if="current && !current.fresh" class="icon-btn more-btn" aria-label="会话操作"            @click.stop="tabMenu($event, current)">
+    <!-- 待办页上没有：它不是会话，菜单里没有能用的项 -->
+    <button v-if="current && !current.fresh && !td.open" class="icon-btn more-btn" aria-label="会话操作"            @click.stop="tabMenu($event, current)">
       <svg viewBox="0 0 16 16"><circle cx="8" cy="3.5" r="0.9"/><circle cx="8" cy="8" r="0.9"/><circle cx="8" cy="12.5" r="0.9"/></svg>
     </button>
     <!-- 新会话页的右上角是自己的头像（照 Gemini），占「⋯」的位置：还没开始的会话没什么可操作的。
          和侧边栏底下那个头像一个样子（主题色圆里写名字头一个字），点了打开账号页；没登录的没有。
          只给窄屏：宽屏的头像固定在左下角（侧边栏底下或收起时的 .rail-me），右上角再放一颗就重复了 -->
-    <button v-if="current?.fresh && me.name && !sideWide" class="icon-btn avatar-btn" :aria-label="`账号：${me.name}`" @click.stop="openMe()">
+    <button v-if="current?.fresh && !td.open && me.name && !sideWide" class="icon-btn avatar-btn" :aria-label="`账号：${me.name}`" @click.stop="openMe()">
       <i class="side-avatar"><img v-if="avatarSrc" :src="avatarSrc" alt=""><template v-else>{{ me.name.slice(0, 1) }}</template></i>
     </button>
     <!-- 推送断了：顶上按钮底下居中的一颗药丸，带个转圈，字收短到手机上一行放得下（用户反馈横幅样式旧），重新连上就收起 -->
@@ -274,19 +282,32 @@
       </div>
       </div>
       <div class="chip-grp grp-c">
-      <!-- 上下文用量：只写用了多少 k，不画条、不写百分比；用多了字变色提醒（ctx.warn，分档见 chat.js）。
+      <!-- 上下文用量：只写用了多少 k（不留小数，kiloInt），不画条、不写百分比；用多了字变色提醒（ctx.warn，分档见 chat.js）。
            悬停弹出上下文组成的环形图（ctx-ring.js，像 GNOME 磁盘用量分析：里圈粗外圈细，拆到每个文件、每个气泡）；
            电脑上点药丸照旧打开会话信息，手机上点药丸开关这张卡片，卡片底下有会话信息的入口 -->
-      <!-- 从上下文药丸进去（悬停、点开）先看上下文那张；从标题前的花费点进去先看花费那张，进去后照样能切换 -->
+      <!-- 上下文这颗的卡片只画上下文（solo）；底下那排挤得把花费并回来时（toolsMerged）带回两种视角的切换，从这里进去先看上下文 -->
       <!-- 请求大小提醒（chat.js 的 reqWarn）：最大的一次请求到了上游单条上限的七成才出现，悬停看说明，手机上点一下弹出说明 -->
       <button v-if="reqWarn" class="chip req-chip" :class="reqWarn.over ? 'warn-r' : 'warn-o'"              @click.stop="say(reqWarn.tip)">{{ reqWarn.text }}</button>
+      <!-- 花费（从上下文那颗的卡片里拆出来，两颗一样的样子）：写这个会话花了多少（和花费那张图顶上的数一样，写短的：两位有效数字、一百元以上不留小数、数后面带 ¥），
+           悬停（手机上点）弹出花费的环形图，卡片里不再切换；电脑上点它打开会话信息、先看花费。
+           底下那排放不下时（app.js 的 fitTools）先把 Remotes 缩成图标加台数，还不够才把它并回上下文那颗（fit-merge 时藏起来） -->
+      <div v-if="ctx && spentText(current.spent)" class="dd ctx-dd spend-dd" :class="{ on: openDd === 'spend' }" @mouseenter="loadCtxMap()">
+        <button class="chip ctx-chip spend-chip" @click.stop="touch ? (toggleDd('spend'), loadCtxMap()) : (ctxView = 'spend', openInfo())"><spent-pts chip
+          :spent="current.spent" :paid="current.spentPaid" :blue="current.spentBlue"></spent-pts></button>
+        <div class="dd-panel ctx-panel">
+          <ctx-views view="spend" solo="spend" foot :maps="ctxMap" :tab-id="current.id" :ctx="ctx"
+                     :spent="current.spent" :spent-paid="current.spentPaid" :spent-blue="current.spentBlue" @jump="jumpCtx">
+            <template #extra><button v-if="!readonly" class="mini" @click.stop="openDd = ''; ctxView = 'spend'; openInfo()">会话信息…</button></template>
+          </ctx-views>
+        </div>
+      </div>
       <div v-if="ctx" class="dd ctx-dd" :class="{ on: openDd === 'ctx' }" @mouseenter="ctxView = 'ctx'; loadCtxMap()">
-        <button class="chip ctx-chip" @click.stop="ctxView = 'ctx'; touch ? (toggleDd('ctx'), loadCtxMap()) : openInfo()"><span :class="ctx.warn">{{ kilo(ctx.total) }}</span></button>
+        <button class="chip ctx-chip" @click.stop="ctxView = 'ctx'; touch ? (toggleDd('ctx'), loadCtxMap()) : openInfo()"><span :class="ctx.warn">{{ kiloInt(ctx.total) }}</span></button>
         <!-- 两种视角：上下文里装着什么 / 这个会话的花费花在哪（第一圈是缓存写入、缓存命中、输出）。
              能点的都放在卡片最底下、挨着药丸，和手机上的做法一样：卡片从下看板往上开、底边不动，
              上面的内容怎么变高变矮，切换按钮都待在原处，鼠标不会被甩到卡片外面 -->
         <div class="dd-panel ctx-panel">
-          <ctx-views v-model:view="ctxView" foot :maps="ctxMap" :tab-id="current.id" :ctx="ctx"
+          <ctx-views v-model:view="ctxView" foot :solo="toolsMerged ? '' : 'ctx'" :maps="ctxMap" :tab-id="current.id" :ctx="ctx"
                      :spent="current.spent" :spent-paid="current.spentPaid" :spent-blue="current.spentBlue" @jump="jumpCtx">
             <template #extra><button v-if="!readonly" class="mini" @click.stop="openDd = ''; openInfo()">会话信息…</button></template>
           </ctx-views>
@@ -307,13 +328,13 @@
         </div>
       </div>
       <span v-else-if="current.mode" class="chip faint mode-chip" :class="'m-' + current.mode">{{ modeShort(current.mode) }}</span>
-      <!-- 工作设备（devices.js 的 workShown 等，服务器 workdev.py）：小标签写「Remotes · 勾上几台」，点开勾选，当场生效（门卫按它放行，
+      <!-- 工作设备（devices.js 的 workShown 等，服务器 workdev.py）：小标签写「Remotes · 勾上几台」（底下那排放不下时只写图标加台数，work-short），点开勾选，当场生效（门卫按它放行，
            Claude 在下一句话收到新清单）；最底下一直有「＋ 添加设备」。新会话标签页也在这里（以前在中间的表单里单占一行）：
            勾选先记在标签页上（devices.js 的 toggleWork），发第一句话时交给服务器。
            一台自己的设备都没有时挂小红点（devDot）。右上角「⋯」里的「工作设备…」打开的也是这张卡片 -->
       <div v-if="workShown(current)" class="dd work-dd" :class="{ on: openDd === 'work' }" @mouseenter="dev.loaded || loadDevices()">
         <button class="chip faint mode-chip work-chip" @click.stop="toggleDd('work'); loadDevices()">
-          <span class="chip-text">{{ dev.workBusy === current.id ? '正在保存…' : workText(current) }}</span><i v-if="devDot" class="rdot"></i></button>
+          <span class="chip-text work-full">{{ dev.workBusy === current.id ? '正在保存…' : workText(current) }}</span><span class="work-short"><svg viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M8 21h8M12 17v4"/></svg>{{ dev.workBusy === current.id ? '…' : workCount(current) }}</span><i v-if="devDot" class="rdot"></i></button>
         <div class="dd-panel modes work-panel">
           <div class="dd-title">本会话可用设备</div>
           <label class="switch"><input type="checkbox" checked disabled><i></i>{{ CLOUD }}<small class="work-state">Claude 所在主机</small></label>
@@ -390,7 +411,7 @@
                    第二行标签药丸、花费；时间（只写最大的一个单位，shortAgo）在最右边、上下居中，各行靠右对齐（列表是网格，每行用子网格）。
                    「⋯」和药丸右端的半圆同心，电脑上悬停才出来、盖住时间，手机上一直在、时间让到它左边。
                    新会话标签页、刚建成还没进列表的会话排在最上面（sessions.js 的 recentTabs）：第二行写正在创建、工作区或刚刚，没有「⋯」 -->
-              <button v-for="t in recentTabs" :key="t.id" class="dd-item side-sess" :class="{ on: t.id === active }" @click="sideDone(); select(t)">
+              <button v-for="t in recentTabs" :key="t.id" class="dd-item side-sess" :class="{ on: t.id === active && !td.open }" @click="sideDone(); select(t)">
                 <i class="dot side-dot" :class="sideDot(t)"></i>
                 <span class="side-title">{{ t.fresh ? t.pending?.[0]?.text || '新会话' : t.title || fileName(t.path) }}</span>
                 <small class="side-meta">{{ t.fresh ? (t.busy ? '正在创建…' : t.cwd || '~') : '刚刚' }}</small>
@@ -399,7 +420,7 @@
                    右键（手机上长按）、右边的「⋯」：和右上角「⋯」同一份会话菜单（app.js 的 sideMenu）。
                    花费几段用加号连、不写「分」，不写工作区 -->
               <!-- 手机上往右划一行露出主题色的底，划过松手置顶或取消（app.js 的 pinSwipe）；置顶的排在最上面，第二行开头一颗小图钉 -->
-              <button v-for="s in recent" :key="s.id" class="dd-item side-sess" :class="{ on: s.id === active }"
+              <button v-for="s in recent" :key="s.id" class="dd-item side-sess" :class="{ on: s.id === active && !td.open }"
                       @click="sideDone(); openRecent(s)" v-longpress="e => sideMenu(e, s)"
                       v-pin-swipe="sidePins ? () => togglePin(s) : null" :data-pin="s.pinned ? '取消置顶' : '置顶'" :data-id="s.id">
                 <i class="dot side-dot" :class="sideDot(s)"></i>
@@ -432,10 +453,32 @@
             <!-- 自动切号：当前的号被预测拦截拦下时，按自动挑号的排法换一个号接着发（server.switch_target），默认开着 -->
             <label v-if="typeof globalSettings.autoSwitch === 'boolean'" class="switch"><input type="checkbox"
               :checked="globalSettings.autoSwitch" :disabled="switchBusy" @change="setAutoSwitch($event.target)"><i></i>自动切换账号</label>
-            <!-- 底部标签页：也留着页面底下的标签页栏（sessions.keepTabs），默认关 -->
+            <!-- 底部标签页：也留着页面底下的标签页栏（sessions.keepTabs），默认开（users.bottom_tabs） -->
             <label v-if="typeof globalSettings.bottomTabs === 'boolean'" class="switch"><input type="checkbox"
               :checked="globalSettings.bottomTabs" :disabled="tabsBusy" @change="setBottomTabs($event.target)"><i></i>底部标签页</label>
-            <!-- 新会话页上放不放这几项（sessions.feature）：服务器给了才有（旧后端没有，照旧全都有）。不另起「新会话」小标题（用户反馈没必要），
+            <!-- 讯飞语音输入（voice.js、服务器 voice.py）：识别服务和讯飞开放平台的三样密钥跟着账号存，配了输入框里才有语音按钮。
+                 旧后端不给 voice，不出这一项。APISecret 存进去就不再给回来，两个密钥框留空保存是沿用已存的 -->
+            <template v-if="globalSettings.voice">
+              <div class="set-pick"><span>语音输入</span><button type="button" class="mini" @click="openVoiceForm()">{{
+                voiceForm.open ? '收起' : globalSettings.voice.service ? '修改' : '配置' }}</button></div>
+              <p class="global-note">{{ globalSettings.voice.service
+                ? `讯飞${globalSettings.voice.serviceName} · APPID ${globalSettings.voice.appid} · APIKey 末四位 ${globalSettings.voice.keyTail}`
+                : '未配置。填入讯飞开放平台的 APPID、APIKey、APISecret 后，输入框发送按钮左边会出现语音按钮' }}</p>
+              <form v-if="voiceForm.open" class="voice-form" @submit.prevent="saveVoice">
+                <ui-select v-model="voiceForm.service" aria-label="识别服务"
+                           :options="globalSettings.voiceServices.map(s => ({ value: s.id, label: s.name }))"></ui-select>
+                <input v-model="voiceForm.appid" autocomplete="off" spellcheck="false" placeholder="APPID">
+                <input v-model="voiceForm.apiKey" autocomplete="off" spellcheck="false"
+                       :placeholder="globalSettings.voice.service ? 'APIKey（留空则不修改）' : 'APIKey'">
+                <input v-model="voiceForm.apiSecret" type="password" autocomplete="new-password"
+                       :placeholder="globalSettings.voice.service ? 'APISecret（留空则不修改）' : 'APISecret'">
+                <div class="voice-form-btns">
+                  <button v-if="globalSettings.voice.service" type="button" :disabled="voiceForm.busy" @click="clearVoice()">清除配置</button>
+                  <button type="submit" :disabled="voiceForm.busy">{{ voiceForm.busy ? '正在保存…' : '保存' }}</button>
+                </div>
+              </form>
+            </template>
+            <!-- 新会话页上放不放这几项（sessions.feature）：服务器给了才有（旧后端没有，照旧全都有）。不另起「新会话」小标题（没必要），
                  存的时候开关先变灰点不了，没存上由 setFeature 报错、开关弹回去。
                  二次元风格 UI（存的还是 persona 那个键）只管外观：新会话页上的看板娘小小蓝白（加载不了时是颜文字）和人设卡下拉，关着时人设卡照样用最近选的那张。
                  小小蓝白的出处（对方要求写在设置里）紧跟在这个开关下面；看不到这个开关的人写在设置页最后（xxlb.js 的 XxlbCredit）。
@@ -461,7 +504,7 @@
               <ui-select class="global-pick" :model-value="globalSettings.mine || 'auto'" :disabled="globalSettings.busy"
                          aria-label="新会话默认账号" @change="v => saveSetting('defaultAccount', v, 'mine')"
                          :options="[{ value: 'auto', label: '自动（额度最充足）' },
-                                    ...sortedAccounts.map(a => ({ value: a.name, label: acctLabel(a), disabled: a.banned }))]"></ui-select></div>
+                                    ...defaultChoices.map(a => ({ value: a.name, label: acctLabel(a), disabled: a.banned }))]"></ui-select></div>
               <p class="global-note">{{ globalSettings.busy ? '正在保存…'
                 : globalSettings.default.account ? `当前：${globalSettings.default.account}` : '当前无可用账号' }}</p>
             </template>
@@ -545,11 +588,15 @@
        最近的会话和设置写在看板那段模板里，由 teleport 搬过来（#side-recent、#side-settings），所以这里一直留着、只是藏起来。
        从账号页打开的账本、设备这些弹窗盖在侧边栏上面，关了回到账号页 -->
   <transition name="side-in" :duration="260">
-  <!-- 手机上在对话区往右划打开它，在它上面往左划收起（app.js 的 onTouchEnd、onSideTouchEnd） -->
-  <div v-show="sideOpen" class="side-wrap" @touchstart.passive="onSideTouchStart" @touchend.passive="onSideTouchEnd">
+  <!-- 手机上在对话区往右拖跟手拉出它（拖的时候 sideDrag 让它先露出来），在它上面往左拖跟手收起（app.js 的 startSideDrag、onSideTouchMove） -->
+  <div v-show="sideOpen || sideDrag" class="side-wrap" @touchstart.passive="onSideTouchStart" @touchmove.passive="onSideTouchMove"
+       @touchend.passive="onSideTouchEnd" @touchcancel.passive="onSideTouchCancel" @click.capture="onSideClickCapture">
   <div class="side-shade" @click="sideOpen = false"></div>
   <!-- 账号页、设置页铺满全屏（full），会话那一页右边留缝 -->
-  <aside class="side" :class="{ full: sideView !== 'main' }" aria-label="侧边栏">
+  <!-- with-todo：「新会话」底下多一颗「待办」，顶上那块实心的高出一截，列表跟着往下让 -->
+  <aside class="side" :class="{ full: sideView !== 'main', 'with-todo': !readonly && me.todos }" aria-label="侧边栏">
+    <!-- 阴影单独一层（style.css 的 .side-glow），收着、拉出来时跟着压暗的那层淡入淡出 -->
+    <i class="side-glow" aria-hidden="true"></i>
     <div class="side-scroll" @scroll.passive="onSideScroll">
     <div v-show="sideView === 'main'" class="side-body">
       <!-- 「最近」写的是当前的筛选（筛着就换成「进行中 · 论文」这样）；右边漏斗按状态筛、标签按标签筛（app.js 的 sideStateMenu、sideTagMenu），
@@ -559,7 +606,7 @@
       <template v-if="sideTabs">
         <div class="dd-title side-tabs-head">标签页</div>
         <div class="side-tabs">
-          <button v-for="t in tabs" :key="t.id" type="button" class="dd-item side-sess side-tab" :class="{ on: t.id === active }"
+          <button v-for="t in tabs" :key="t.id" type="button" class="dd-item side-sess side-tab" :class="{ on: t.id === active && !td.open }"
                   @click="sideDone(); select(t)" v-longpress="e => tabMenu(e, t)"
                   @mouseenter="showTabTip($event, t, true)" @mouseleave="tabTip.tab = null">
             <i class="dot side-dot" :class="sideDot(t)"></i>
@@ -613,7 +660,16 @@
             <svg class="side-ico" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5"
               height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>
             <span>管理会话</span><i class="side-chev"></i></button>
-          <button v-if="showBalance" type="button" class="side-row" @click="openLedger()">
+          <!-- 余额（改成一张图）：标题一行写此刻的余额，下面最近 30 天的余额曲线（stats.js，每小时一个点，
+               最底下是 0、最高处是最大值），按住拖着看某一刻的余额；点了打开账本。旧后端没有曲线接口，照旧是一行 -->
+          <button v-if="showBalance && !bal.unsupported" type="button" class="side-card" @click="openLedger()">
+            <span class="side-plans-head"><svg class="side-ico" viewBox="0 0 16 16"><rect x="2" y="4" width="12" height="9" rx="1.5"/><path
+              d="M2 7h9.5M11 10h.01"/><path d="M4 4l6-2 1 2"/></svg><b>余额</b><b class="side-card-num" :class="{ neg: me.balance < 0 }">{{ fmtPts(me.balance) }}</b></span>
+            <line-chart v-if="bal.data" :series="[{ key: 'b', label: '余额', values: bal.data.values, cls: 'me', area: true }]"
+                        :times="bal.data.times" :fmt="v => money(v)" :height="78" idle="最近 30 天"></line-chart>
+            <small v-else class="side-card-note" :class="{ neg: bal.error }">{{ bal.error || '正在加载…' }}</small>
+          </button>
+          <button v-else-if="showBalance" type="button" class="side-row" @click="openLedger()">
             <svg class="side-ico" viewBox="0 0 16 16"><rect x="2" y="4" width="12" height="9" rx="1.5"/><path d="M2 7h9.5M11 10h.01"/><path d="M4 4l6-2 1 2"/></svg>
             <span>余额</span><small :class="{ neg: me.balance < 0 }">{{ fmtPts(me.balance) }}</small><i class="side-chev"></i></button>
           <!-- 额度计划（plan.js）：查看器账号给的按周分期发放，还在发的每个一条进度条，紧挨着余额；
@@ -622,6 +678,41 @@
             <span class="side-plans-head"><svg class="side-ico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="11" rx="1.5"/>
               <path d="M2 6.5h12M5.5 1.8v2.4M10.5 1.8v2.4M5 10l1.8 1.6L11 8.5"/></svg><b>额度计划</b><small>每 {{ me.plans[0].days }} 天发放一次</small></span>
             <grant-plan v-for="p in me.plans" :key="p.id" :plan="p"></grant-plan>
+          </button>
+          <!-- 我的号（stats.js）：自己是号主的号一个一张，和额度计划差不多大。能用的在前、最近用过的在前，
+               手机上露两个、宽屏露三个，其余点「展开全部」。每张写 5 小时和本周还剩多少、开通到到期走到哪了、自己和别人各在上面花了多少；
+               点了打开这个号的预定面板（和账号表里右键、长按一样）。旧后端没有接口、或者名下没有号，就没有这块 -->
+          <section v-if="ownedRows.length" class="side-card side-owned">
+            <span class="side-plans-head"><svg class="side-ico" viewBox="0 0 16 16"><circle cx="5.5" cy="8" r="3"/><path
+              d="M8.5 8H14M12 8v2.5M14 8v2"/></svg><b>我的号</b><small>{{ ownedRows.length }} 个</small></span>
+            <transition-group name="own" tag="div" class="own-list">
+              <button v-for="o in ownedShown" :key="o.name" type="button" class="own-card" :class="{ dead: o.status }" @click="openReserve(o.name)">
+                <span class="own-head"><acct-tag :name="o.name" :family="acctFamily(o.name)" color></acct-tag>
+                  <b v-if="o.status" class="paid-mark">{{ o.status }}</b>
+                  <small v-else-if="o.q.weekOut" class="own-dim">本周已用尽{{ o.q.week?.reset ? `，${o.q.week.reset} 重置` : '' }}</small>
+                  <small v-else-if="o.q.balance" class="own-dim">{{ o.q.balance.text }}</small>
+                  <small v-else class="own-dim">{{ o.last ? `${ago(o.last)}用过` : '还没人用过' }}</small></span>
+                <span v-if="!o.status && !o.q.weekOut && (o.q.five || o.q.week)" class="own-bars">
+                  <span v-if="o.q.five" class="own-bar"><small>5 小时</small><i><i :class="o.fiveTier" :style="{ width: o.q.five.rest + '%' }"></i></i><b>{{ o.q.five.value }}</b></span>
+                  <span v-if="o.q.week" class="own-bar"><small>本周</small><i><i :class="o.weekTier" :style="{ width: o.q.week.rest + '%' }"></i></i><b>{{ o.q.week.value }}</b></span>
+                </span>
+                <span v-if="o.exp" class="own-life"><i><i :style="{ width: o.life + '%' }"></i></i>
+                  <small><span>开通 {{ dayText(o.start) }}</span><span>{{ o.status ? `${dayText(o.exp)} 到期` : `${dayText(o.exp)} 到期 · 还剩 ${o.left} 天` }}</span></small></span>
+                <span class="own-money"><span>自己用了 <b>{{ money(o.self) }}</b></span><span>别人用了 <b>{{ money(o.others) }}</b><small
+                  v-if="o.users"> · {{ o.users }} 人</small></span></span>
+              </button>
+            </transition-group>
+            <button v-if="ownedRows.length > ownedMax" type="button" class="own-more" @click="ownedOpen = !ownedOpen">{{ ownedOpen ? '收起'
+              : `展开全部 ${ownedRows.length} 个号` }}</button>
+          </section>
+          <p v-if="owned.error" class="error side-card-note">{{ owned.error }}</p>
+          <!-- 用量（stats.js）：最近 3 天每小时花了多少（按单价），点进去是用量统计页 -->
+          <button v-if="me.name && !mini.unsupported" type="button" class="side-card" @click="openUsage()">
+            <span class="side-plans-head"><svg class="side-ico" viewBox="0 0 16 16"><path d="M2 13.5h12M3 11l3-4 2.5 2.5L13 4"/></svg><b>用量</b><small
+              v-if="mini.data">3 天 {{ money(mini.data.profile.full || 0) }}</small><i class="side-chev"></i></span>
+            <line-chart v-if="mini.data" :series="[{ key: 'u', label: '每小时', values: mini.data.series.full, cls: 'me', area: true }]"
+                        :t0="mini.data.t0" :step="mini.data.step" :fmt="v => money(v)" :height="64" idle="最近 3 天每小时的花费"></line-chart>
+            <small v-else class="side-card-note" :class="{ neg: mini.error }">{{ mini.error || '正在加载…' }}</small>
           </button>
           <button v-if="me.personas" type="button" class="side-row" @click="openPersonas()">
             <svg class="side-ico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="6" cy="7" r="1.4"/>
@@ -676,6 +767,11 @@
         <button v-if="!readonly" type="button" class="side-new" @click="sideDone(); openFresh()">
           <svg class="ico24" viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
             <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>新会话</button>
+        <!-- 待办（todos.js）：紧挨着新会话，点了主区域换成待办页；开着时垫主题色浅底，右边写几条在做。
+             后端没有待办（/api/me 不给 todos）就没有这颗 -->
+        <button v-if="!readonly && me.todos" type="button" class="side-new side-todo" :class="{ on: td.open }" @click="sideDone(); openTodos()">
+          <svg class="ico24" viewBox="0 0 24 24"><path d="M3.5 6.5l1.8 1.8 3.2-3.4M3.5 15.5l1.8 1.8 3.2-3.4M12 7h8.5M12 16h8.5"/></svg>待办<small
+            v-if="counts.doing">{{ counts.doing }} 工作中</small></button>
       </template>
       <template v-else>
         <button type="button" class="side-round side-back" aria-label="返回" @click="sideView = sideView === 'set' ? 'me' : 'main'">
@@ -702,7 +798,7 @@
     <div class="logwrap">
       <!-- 新会话页底下的主题色云（照 Gemini 的光晕，至少三朵）：打开新会话页时从输入框底下一朵接一朵呼出来、铺开就停；
            垫在所有对话区的后面（.logwrap 里排在它们前面），换到另一个新会话标签页重放一遍。说出第一句话就淡掉，会话建成就没了 -->
-      <div v-if="current.fresh" :key="current.id" class="fresh-clouds" :class="{ gone: current.busy || current.pending.length }"
+      <div v-if="current.fresh && !td.open" :key="current.id" class="fresh-clouds" :class="{ gone: current.busy || current.pending.length }"
            aria-hidden="true"><i></i><i></i><i></i></div>
       <!-- 每个标签各留一份渲染好的内容，切换只是显示/隐藏，不重建；展开折叠、图片加载会改变高度，刻度尺跟着重算 -->
       <template v-for="tab in tabs" :key="tab.id">
@@ -711,7 +807,7 @@
                                            'fresh-page': freshPage(tab), 'fresh-gone': freshGone(tab) }"
             :ref="el => setLog(tab, el)" :data-tab="tab.id"
             class="log" @scroll="onScroll" @wheel.passive="onWheel" @toggle.capture="mmSoon" @load.capture="mmSoon"
-            @touchstart.passive="onTouchStart" @touchend.passive="onTouchEnd" v-on="keepTabs ? dragOn : {}">
+            @touchstart.passive="onTouchStart" @touchend.passive="onTouchEnd" v-on="keepTabs || !sideWide ? dragOn : {}">
         <!-- 输入框上面的全部内容包一层：至少撑满「对话区减去输入框」那么高，内容很短时输入框也贴在最底下 -->
         <div class="log-body">
         <!-- 新会话标签页：发出第一句话之前，工作区、标签、账号都还能改 -->
@@ -946,7 +1042,7 @@
         </template>
         </div>
         <!-- 对话框：放在滚动区里、贴底悬浮，左右边缘自然和气泡对齐；只读模式没有 -->
-        <!-- 别人的公开会话：只有它的主人能往里发话（后端同样拦，见 users.use_why） -->
+        <!-- 别人的公开会话：只有它所属的用户能往里发话（后端同样拦，见 users.use_why） -->
         <p v-if="!readonly && useBlock(tab)" class="composer composer-off">{{ useBlock(tab) }}</p>
         <form v-else-if="!readonly" class="composer" @submit.prevent="sendChat" @dragover.prevent @drop.prevent="onDropFiles">
           <!-- 粘贴或拖进来、还没发出去的图 -->
@@ -988,11 +1084,19 @@
             <p v-if="m.why" class="cmd-why">{{ m.why }}</p>
           </div>
           </transition>
+          <!-- 从待办页开出的新会话（todos.js 的 sendPicked）：要发给 Claude 的那段说明画成同样的卡片，不占输入框；
+               发出去时拼在用户的话前面（chat.js 的 deliver），发送中、打「/」叫出指令卡片时先收起；× 是这次不从待办开出 -->
+          <transition :css="false" @leave="cardShrink">
+          <div v-if="tab.fresh && tab.todoNote && !m && !tab.sending" class="cmd-card todo-note" @vue:mounted="cardGrow" @vue:updated="cardGrow">
+            <p>{{ tab.todoNote.text }}</p>
+            <button type="button" class="todo-note-x" aria-label="不从待办开出" @mousedown.prevent @click="dropTodoNote(tab)">×</button>
+          </div>
+          </transition>
           </template>
           <template v-for="n in [cacheNote(tab)]" :key="'cache'">
           <textarea :ref="el => tab.id === active && (composerInput = el)" v-model="tab.draft" rows="1" :class="{ 'cache-ph': n }"
-                    @input="autoGrow" @keydown.enter.exact="onEnter" @keydown.tab.exact="onCmdTab" @paste="onPaste"
-                    @compositionstart="tab.composing = true" @compositionend="tab.composing = false"
+                    @input="tab.typed = $event.target.value; autoGrow()" @keydown.enter.exact="onEnter" @keydown.tab.exact="onCmdTab" @paste="onPaste"
+                    @compositionstart="tab.typed = $event.target.value; tab.composing = true" @compositionend="tab.composing = false"
                     :placeholder="tab.fresh ? askHint(tab) : n ? n.lead + n.mark + n.tail + (n.cost || '价格未知（该模型暂无单价）') : composerHint"></textarea>
           <!-- 输入法还没上屏的拼音字母不进 v-model（tab.draft 还是空的），要另外认 composing，不然提示压在拼音上 -->
           <span v-if="n && !tab.draft && !tab.composing" class="cache-hint" aria-hidden="true">{{ n.lead }}<em>{{ n.mark }}</em>{{ n.tail }}<em>{{ n.cost || '价格未知（该模型暂无单价）' }}</em></span>
@@ -1024,9 +1128,18 @@
                   :disabled="!tab.draft.trim() || tab.staging" :class="{ busy: tab.staging }" @click="stageChat">
             <svg viewBox="0 0 16 16"><path d="M8 3.5v9M3.5 8h9"/></svg>
           </button>
+          <!-- 讯飞语音输入（voice.js）：设置里配过讯飞的人才有，点一下开始说、再点一下结束，字写进输入框不自动发。
+               五根竖条像频响，说话时变成主题绿、竖条跟着音量跳（--lv 由 voice.js 直接改）；取地址、开麦克风、等最后的字时灰着。
+               按下时不抢输入框的焦点，光标位置留着、手机上键盘不收 -->
+          <button v-if="globalSettings.voice?.service" type="button" class="icon-btn voice"
+                  :class="{ on: voiceOn(tab), busy: voiceOn(tab) && voiceRec.state !== 'live' }"
+                  :aria-label="voiceOn(tab) ? '结束语音输入' : '语音输入'" @mousedown.prevent @click="toggleVoice(tab)">
+            <svg viewBox="0 0 16 16"><path class="b1" d="M3 6.5v3"/><path class="b2" d="M5.5 4.5v7"/><path class="b3" d="M8 2.5v11"/><path
+              class="b4" d="M10.5 4.5v7"/><path class="b5" d="M13 6.5v3"/></svg>
+          </button>
           <!-- Claude 在跑的时候，只要输入框里有字就还能发：那一句会作为插话排在这一轮后面 -->
           <button v-if="!tab.running || tab.draft.trim() || tab.attach.length || tab.files.length || tab.staged.length" class="icon-btn send"
-                  :aria-label="tab.running ? '插话' : '发送'"                  :disabled="!tab.draft.trim() && !tab.attach.length && !tab.files.length && !tab.staged.length">
+                  :aria-label="tab.running ? '插话' : '发送'"                  :disabled="!tab.draft.trim() && !tab.attach.length && !tab.files.length && !tab.staged.length && !(tab.fresh && tab.todoNote)">
             <svg viewBox="0 0 16 16"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>
           </button>
           <button v-if="tab.running" type="button" class="icon-btn stop" :class="{ busy: tab.stopping }"
@@ -1044,15 +1157,151 @@
       </template>
       <!-- 跟手翻页时，要露出来的标签页已经收掉、没有画好的内容，就先拿这一页顶上（app.js 的 pageEl），停在它上面以后再加载 -->
       <div v-for="id in peeks" :key="id" class="log log-peek" :data-peek="id"><p>正在打开…</p></div>
+      <!-- 待办页（todos.js、服务器 todos.py）：对话区里的一种页面，和新会话页、会话同级（不是能叉掉的弹窗）。
+           盖在各对话区上面、顶上浮着的圆按钮底下：左上角照旧开侧边栏，往右划照旧拉出侧边栏（和对话区同一套 onTouchStart / onTouchEnd），
+           侧边栏里挑会话、开新会话就换走。顶上一行标题和三个筛选，下面一颗输入框，打字回车就新建一条，新建的那条当场展开。
+           按分组列成紧凑的一行行，下级缩进列在上级底下；做完、不做了的折在最底下「已完成」。左边圆圈多选，底下浮出「发送到新会话」。
+           条目是用户工作区里的文件（todos.py 开头），一份清单当成一个分组，没有层级、分组和父项可改；
+           页面上的改动攒着，标「待同步」，AI 下次读清单时写进文件 -->
+      <section v-if="td.open" class="todo-page" aria-label="待办" @click="closePops()" @scroll.passive="onTodoScroll"
+               @touchstart.passive="onTouchStart" @touchend.passive="onTouchEnd" v-on="keepTabs || !sideWide ? dragOn : {}">
+        <div class="todo-col">
+          <header class="todo-head">
+            <strong>待办</strong>
+            <span class="todo-filters">
+              <button v-for="f in [['all', '全部', counts.all], ['doing', '工作中', counts.doing], ['due', '有时限', counts.due]]" :key="f[0]" type="button"
+                      class="todo-fp" :class="{ on: td.filter === f[0] }" @click="td.filter = f[0]">{{ f[1] }} {{ f[2] }}</button>
+            </span>
+          </header>
+          <form class="todo-add" @submit.prevent="quickAdd()">
+            <svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>
+            <input v-model="td.draft" :maxlength="td.max.title" placeholder="新建待办，回车保存" autocomplete="off" enterkeyhint="done">
+            <button v-if="td.draft.trim()" class="todo-add-btn" :disabled="td.busy === 'add'">{{ td.busy === 'add' ? '正在添加…' : '添加' }}</button>
+          </form>
+          <p v-if="td.error" class="error todo-msg">{{ td.error }} <button type="button" class="mini" @click="loadTodos()">重试</button></p>
+          <p v-else-if="!td.loaded" class="todo-msg">正在加载…</p>
+          <p v-else-if="!sections.length && !td.lists.some(x => x.error)" class="todo-msg">{{ td.items.length ? '无符合筛选的待办'
+            : td.listsKnown && !td.lists.length ? '还没有登记待办清单' : '暂无待办' }}<button v-if="td.listsKnown && !td.lists.length" type="button"
+            class="mini todo-fix" @click="fixList(null)">让 AI 新建一份</button></p>
+          <!-- 一份清单里有文件不符合格式，这份就不列条目（todos.py 的 overview），只说哪里不对（不符合就空着说不符合，给 AI 去修） -->
+          <p v-for="l in td.lists.filter(x => x.error)" :key="'err:' + l.name" class="error todo-msg">清单「{{ l.name }}」显示不了：{{ l.error }}<button
+             type="button" class="mini todo-fix" @click="fixList(l)">让 AI 修好</button></p>
+          <template v-for="g in sections" :key="g.name">
+            <div class="todo-gh" @click="toggleSection(g.name)"><span>{{ g.label }}</span><span>{{ g.rows.length }} {{ td.shut[g.name] ? '▸' : '▾' }}</span></div>
+            <transition name="todo-fold">
+            <transition-group v-if="!td.shut[g.name]" tag="div" name="todo-row" class="todo-grp">
+              <div v-for="r in g.rows" :key="r.it.id" class="todo-row"
+                   :class="{ open: td.expanded === r.it.id, fresh: td.fresh === r.it.id, closed: g.name === '__done', sub: r.depth > 0 }"
+                   :style="{ '--depth': r.depth }">
+                <button type="button" class="todo-ck" :class="{ on: td.picked.includes(r.it.id) }" :disabled="g.name === '__done'"
+                        :aria-label="td.picked.includes(r.it.id) ? '取消选择' : '选择'" @click="togglePick(r.it)"><svg viewBox="0 0 12 12"><path
+                        d="M2.5 6.2l2.3 2.3 4.7-5"/></svg></button>
+                <!-- 标题只有这一行：展开时右边一支铅笔，点了就地换成输入框（回车、点开别处存，Esc 不存） -->
+                <!-- 点一行：有折着的子项先展开子项，再点一次才展开这条来改（todos.js 的 clickRow）；标题右边「几个子项」点了收起、展开子项 -->
+                <div class="todo-main" @click="editing(r.it, 'title') || clickRow(r)">
+                  <div class="todo-tr">
+                    <input v-if="editing(r.it, 'title')" v-model="td.edit.text" class="todo-title-in" :maxlength="td.max.title" aria-label="标题"
+                           enterkeyhint="done" @click.stop @keydown.enter.prevent="$event.target.blur()" @keydown.esc="endEdit(false)" @blur="endEdit()">
+                    <span v-else class="todo-title">{{ r.it.title }}</span><i v-if="r.it.pending?.length && !editing(r.it, 'title')"
+                       class="todo-pend">待同步</i><i v-if="workingOf(r.it).length && !editing(r.it, 'title')"
+                       class="todo-run" aria-label="有会话正在做">▶</i>
+                    <button v-if="r.kids && td.filter === 'all' && !editing(r.it, 'title')" type="button" class="todo-kids"
+                            :class="{ on: td.unfold.includes(r.it.id) }" @click.stop="toggleKids(r.it)">{{ r.kids }} 个子项<svg
+                            viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5"/></svg></button>
+                    <transition name="todo-fade"><button v-if="td.expanded === r.it.id && !editing(r.it, 'title')" type="button" class="todo-pen"
+                       aria-label="编辑标题" @click.stop="startEdit(r.it, 'title')"><svg viewBox="0 0 16 16"><path
+                       d="M10.8 2.7a1.6 1.6 0 0 1 2.3 2.3l-7.6 7.6-3 .8.8-3z"/></svg></button></transition>
+                  </div>
+                  <div v-if="r.it.summary && r.depth === 0 && r.it.level === 1 && td.expanded !== r.it.id" class="todo-sum">{{ r.it.summary }}</div>
+                </div>
+                <div class="todo-meta">
+                  <span v-if="r.it.deadline && g.name !== '__done'" class="todo-due"
+                        :class="{ guess: r.it.deadline.src !== 'user', soon: daysLeft(r.it.deadline) <= 7 }">{{ dueText(r.it.deadline) }}</span>
+                  <span v-if="r.it.importance" class="todo-im" :class="[r.it.importance.v, { guess: r.it.importance.src !== 'user' }]">{{ TODO_IMP[r.it.importance.v] }}</span>
+                </div>
+                <!-- 展开：状态、重要性、时限各一根滑动药丸（点了就存，算用户定的；重要性、时限再点一次选中的那段是清掉，推断的滑块画虚线），
+                     分组一颗输入框，再往下是现状、描述、进展、不清楚的事和挂着的会话 -->
+                <transition name="todo-fold">
+                <div v-if="td.expanded === r.it.id" class="todo-detail">
+                  <p v-if="r.it.summary" class="todo-text">{{ r.it.summary }}</p>
+                  <div class="todo-q"><span class="todo-ql">状态</span>
+                    <div class="effort-seg todo-seg" :style="{ '--n': 5, '--i': Object.keys(TODO_STATUS).indexOf(r.it.status) }">
+                      <i class="effort-thumb"></i>
+                      <button v-for="(l, k) in TODO_STATUS" :key="k" type="button" :class="{ on: r.it.status === k }"
+                              @click="r.it.status === k || setTodo(r.it, { status: k })">{{ l }}</button></div></div>
+                  <!-- 时限排在重要前面，列表右边也是剩几天在前。月历、分组和父项的候选都浮在那一行底下（.todo-pop），不把下面往下顶 -->
+                  <div class="todo-q todo-anchor" @click.stop><span class="todo-ql">时限</span>
+                    <div class="effort-seg todo-seg" :class="{ guess: r.it.deadline && r.it.deadline.src !== 'user' }"
+                         :style="{ '--n': 4, '--i': Math.max(0, dueIndex(r.it)) }">
+                      <i class="effort-thumb" :class="{ none: !r.it.deadline }"></i>
+                      <button v-for="(c, i) in DUE_CHOICES()" :key="c[0]" type="button" :class="{ on: dueIndex(r.it) === i }"
+                              @click="rate(r.it, 'deadline', c[1])">{{ c[0] }}</button>
+                      <button type="button" :class="{ on: dueIndex(r.it) === 3 }" @click="openCal(r.it)">{{ dueIndex(r.it) === 3
+                        ? r.it.deadline.v.slice(5) : '日期' }}</button></div>
+                  <!-- 点「日期」浮出月历（todos.js 的 openCal）：‹ › 翻月，点一天就存；选中的主题色圆底，今天一圈细边 -->
+                  <transition name="todo-fold">
+                  <div v-if="td.cal.id === r.it.id" class="todo-pop todo-cal">
+                    <div class="todo-cal-head">
+                      <button type="button" class="todo-cal-nav" aria-label="上个月" @click="calMove(-1)"><svg viewBox="0 0 16 16"><path d="M10 3.5 5.5 8l4.5 4.5"/></svg></button>
+                      <b>{{ td.cal.y }} 年 {{ td.cal.m + 1 }} 月</b>
+                      <button type="button" class="todo-cal-nav" aria-label="下个月" @click="calMove(1)"><svg viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5"/></svg></button>
+                    </div>
+                    <div class="todo-cal-grid">
+                      <span v-for="w in ['一', '二', '三', '四', '五', '六', '日']" :key="w" class="todo-cal-w">{{ w }}</span>
+                      <button v-for="c in calDays()" :key="c.iso" type="button" class="todo-cal-d"
+                              :class="{ out: c.out, today: c.iso === todayIso(), on: c.iso === r.it.deadline?.v }" @click="pickDay(r.it, c.iso)">{{ c.d }}</button>
+                    </div>
+                    <div class="todo-cal-foot">
+                      <button type="button" class="todo-cal-btn" :disabled="!r.it.deadline" @click="pickDay(r.it, '')">清除</button>
+                      <button type="button" class="todo-cal-btn" @click="pickDay(r.it, todayIso())">今天</button>
+                    </div>
+                  </div>
+                  </transition></div>
+                  <div class="todo-q"><span class="todo-ql">重要</span>
+                    <div class="effort-seg todo-seg" :class="{ guess: r.it.importance && r.it.importance.src !== 'user' }"
+                         :style="{ '--n': 5, '--i': Math.max(0, Object.keys(TODO_IMP).indexOf(r.it.importance?.v)) }">
+                      <i class="effort-thumb" :class="{ none: !r.it.importance }"></i>
+                      <button v-for="(l, k) in TODO_IMP" :key="k" type="button" :class="{ on: r.it.importance?.v === k }"
+                              @click="rate(r.it, 'importance', k)">{{ l }}</button></div></div>
+                  <!-- 描述默认只露三行，点一下展开全文，再点收起 -->
+                  <div v-if="r.it.body?.trim()" class="todo-body" :class="{ open: td.bodyOpen.includes(r.it.id), short: !bodyLong(r.it) }"
+                       @click="bodyLong(r.it) && toggleBody(r.it)">
+                    <pre>{{ r.it.body.trim() }}</pre><small v-if="bodyLong(r.it)">{{ td.bodyOpen.includes(r.it.id) ? '收起' : '展开描述' }}</small></div>
+                  <div v-if="r.it.progress?.length" class="todo-sec"><small>进展</small>
+                    <ul><li v-for="p in r.it.progress.slice(-5).reverse()" :key="p.t"><time>{{ clock(p.t * 1000) }}</time>{{ p.text }}</li></ul>
+                    <small v-if="r.it.progress.length > 5" class="todo-more">另有 {{ r.it.progress.length - 5 }} 条更早的进展</small></div>
+                  <div v-if="r.it.unknowns?.length" class="todo-sec"><small>待查明</small>
+                    <ul><li v-for="(u, i) in r.it.unknowns" :key="i">{{ u.text }}<em v-if="u.how === 'check'">可查{{ u.detail ? `：${u.detail}` : '' }}</em><em
+                        v-else-if="u.how === 'ask'">待确认{{ u.detail ? `（猜测：${u.detail}）` : '' }}</em></li></ul></div>
+                  <!-- 网页上的改动先攒着（todos.py 的 pending），AI 下次读清单时写进文件；写进去之前这里列出来 -->
+                  <div v-if="r.it.pending?.length" class="todo-sec"><small>还没写进文件</small><ul><li v-for="(p, i) in r.it.pending" :key="i">{{ p }}</li></ul></div>
+                  <div v-if="r.it.dir" class="todo-sec"><small>材料</small><code>{{ r.it.dir }}</code></div>
+                  <div v-if="r.it.file" class="todo-sec"><small>文件</small><code>{{ r.it.file }}</code></div>
+                  <div v-for="lg in linkGroups(r.it)" :key="lg.k" class="todo-sec"><small>{{ lg.label }}</small>
+                    <button v-for="x in lg.list" :key="x.sid" type="button" class="todo-sess" :class="{ gone: x.s.missing || x.s.deleted }" @click="openLinked(x.s)">
+                      <i class="dot side-dot" :class="x.s.missing ? 'idle' : sideDot(x.s) === 'idle' && x.s.state ? x.s.state : sideDot(x.s)"></i>
+                      <span>{{ x.s.elsewhere ? `${x.s.elsewhere} 上的会话` : x.s.missing ? '找不到的会话' : x.s.title || fileName(x.s.path) }}{{ x.s.deleted ? '（已删除）' : '' }}</span>
+                      <small>{{ shortAgo(x.t) }}</small></button></div>
+                </div>
+                </transition>
+              </div>
+            </transition-group>
+            </transition>
+          </template>
+        </div>
+        <div class="todo-bar" :class="{ on: td.picked.length > 0 }"><span>已选 {{ td.picked.length }} 条</span>
+          <button type="button" class="todo-cancel" @click="td.picked = []">取消</button>
+          <button type="button" class="todo-send" @click="sendPicked()">发送到新会话</button></div>
+      </section>
       <!-- up：刚才在往上翻。手机上两个按钮只在往上翻时浮出来（电脑上不管这个）。
            图标是箭头顶到一道横线上（到底、到顶），和发送那个单独的箭头分开：一个是翻页面，一个是发消息（用户反馈两者长得一样） -->
       <!-- 用不着时不拿掉（v-show 是一下子没了），加 gone 淡出，见 style.css 的 .to-top.gone（用户反馈滚到顶时按钮瞬间消失） -->
       <!-- 新会话标签页（current.fresh）不是对话，两个按钮都用不着：切过去时离顶、离底还是上一个标签页量的，会平白冒出来 -->
-      <button class="icon-btn to-bottom" :class="{ up: scrollUp, gone: !farFromBottom || current?.fresh }" aria-label="回到底部" @click="backToBottom">
+      <button class="icon-btn to-bottom" :class="{ up: scrollUp, gone: !farFromBottom || current?.fresh || td.open }" aria-label="回到底部" @click="backToBottom">
         <svg viewBox="0 0 16 16"><path d="M8 2.5v8M4.5 7.5 8 11l3.5-3.5M3.5 13.5h9"/></svg>
       </button>
       <!-- 回到顶部：上面还有没取回来的，先一次全取回来再滚上去 -->
-      <button class="icon-btn to-top" :class="{ up: scrollUp, gone: !farFromTop || current?.fresh }" aria-label="回到顶部" @click="backToTop">
+      <button class="icon-btn to-top" :class="{ up: scrollUp, gone: !farFromTop || current?.fresh || td.open }" aria-label="回到顶部" @click="backToTop">
         <span v-if="current?.earlier" class="spinner small"></span>
         <svg v-else viewBox="0 0 16 16"><path d="M8 13.5v-8M4.5 8.5 8 5l3.5 3.5M3.5 2.5h9"/></svg>
       </button>
@@ -1150,7 +1399,7 @@
                       @click="pickCard(s)" v-on="menu.on(e => cardMenu(e, s))">
                 <span class="card-title"><spent-pts stack :spent="s.spent" :paid="s.spentPaid" :blue="s.spentBlue"></spent-pts>{{ s.title || fileName(s.path) }}</span>
                 <span v-if="s.tags?.length" class="tags"><span v-for="t in s.tags" :key="t" class="tag" :style="tagStyle(t)">{{ t }}</span></span>
-                <!-- 有主的会话写上主人和谁能看；查看器账号才看得到的别人的私有会话标出来 -->
+                <!-- 有主的会话写上所属用户和谁能看；查看器账号才看得到的别人的私有会话标出来 -->
                 <small v-if="s.owner" class="card-owner"><span v-if="lockedForOthers(s)" class="lock">私有</span>{{ s.owner }} · {{ visText(s) }}</small>
                 <!-- 不按目录分组时，卡片上写一下是哪个工作区的 -->
                 <small v-if="!g.dir" class="card-ws">{{ fileName(s.ws) || s.ws }}</small>
@@ -1189,7 +1438,7 @@
               </button>
             </template>
           </section>
-          <!-- 删掉的会话（只有它的主人和查看器账号看得到这一组）：打不开，只能恢复 -->
+          <!-- 删掉的会话（只有它所属的用户和查看器账号看得到这一组）：打不开，只能恢复 -->
           <section v-if="trashGroup.sessions.length" class="group trash">
             <h3><span class="group-name">已删除</span><small>{{ trashGroup.sessions.length }} 个会话 · 仅在查看器中隐藏，会话文件仍保留</small></h3>
             <div class="cards">
@@ -1228,6 +1477,13 @@
       <div class="info-scroll">
       <ctx-views v-if="current && !current.fresh" v-model:view="ctxView" :maps="ctxMap" :tab-id="current.id" :ctx="ctx"
                  :spent="current.spent" :spent-paid="current.spentPaid" :spent-blue="current.spentBlue" @jump="jumpCtx"></ctx-views>
+      <!-- 会话摘要：平时只露短的三行，点一下原地展开，短的在前、长的跟在后面 -->
+      <div v-if="info.summary" class="info-summary" :class="{ open: info.sumOpen }" role="button"
+           @click="info.sumOpen = !info.sumOpen">
+        <p class="sum-short">{{ info.summary.short }}</p>
+        <p v-if="info.sumOpen" class="sum-long">{{ info.summary.long }}</p>
+      </div>
+      <p v-if="info.sumError" class="error">{{ info.sumError }}</p>
       <p v-if="info.loading" class="empty">正在向 Claude 获取…</p>
       <p v-if="info.error" class="error">{{ info.error }}</p>
       <!-- 只读模式：不连 Claude，只摆会话记录里看得到的 -->
@@ -1295,6 +1551,11 @@
       </div>
       </div>
     </section>
+  </div>
+
+  <!-- 审稿看板：整页的大卡片，能滚，开着时每 10 秒刷新（review-board.js） -->
+  <div v-if="rb.open && current && !current.fresh" class="mask" @click.self="closeReview()">
+    <review-board :tab="current" @close="closeReview()"></review-board>
   </div>
 
   <div v-if="rename.open" class="mask" @click.self="rename.open = false">
@@ -1617,14 +1878,14 @@
       </header>
       <div class="price-scroll">
         <table class="price-table">
-          <!-- 只写缓存写入，不写输入（输入少到可以不计，各家大多也和缓存写入同价）。
+          <!-- 输入、缓存写入、缓存命中、输出各一列：没有缓存的渠道（缓存写入不收钱），输入才是大头。
                数字格写两位小数，悬停或点一下立刻弹出完整的数（style.css 的 .price-num，不用 title） -->
-          <thead><tr><th>模型</th><th>缓存写入</th><th>缓存命中</th><th>输出</th><th>单次调用估算</th><th>相对倍率</th></tr></thead>
+          <thead><tr><th>模型</th><th>输入</th><th>缓存写入</th><th>缓存命中</th><th>输出</th><th>单次调用估算</th><th>相对倍率</th></tr></thead>
           <tbody>
             <tr v-for="p in priceRows" :key="p.key">
               <td class="price-name">{{ p.name }}<acct-tag v-if="p.account" :name="p.account" :family="acctFamily(p.account)" color></acct-tag><b
                 v-if="p.now" class="price-now">现在</b></td>
-              <td v-for="v in [p.r.cw, p.r.cr, p.r.out, p.call, p.times]" class="price-num" :tabindex="v == null ? null : 0"
+              <td v-for="v in [p.r.in, p.r.cw, p.r.cr, p.r.out, p.call, p.times]" class="price-num" :tabindex="v == null ? null : 0"
                   :data-full="v == null ? null : priceFull(v)">{{ v == null ? '–' : priceNum(v) }}</td>
             </tr>
           </tbody>
@@ -1988,6 +2249,90 @@
         <li v-if="!board.loading && !board.users.length" class="plain">暂无用户</li>
       </ul>
       <p v-if="board.error" class="error">{{ board.error }}</p>
+    </section>
+  </div>
+
+  <!-- 用量统计（stats.js、后端 stats.usage）：账号页「用量」点进来。顶上选时间范围和看谁（我、所有人，
+       查看器账号还能挑某个人），下面一块块：几个总数、每小时的用量曲线（能换花费、请求次数、三种 token）、一天里什么时候用、
+       典型的一次请求、三种 token 的分布、输入里缓存占多少、按模型、按号、会话、每个人（只给查看器账号）。
+       看自己或某个人时都和「其他人」「所有人」对照着画：自己主题色，别人灰色 -->
+  <div v-if="us.open" class="mask" @click.self="us.open = false">
+    <section class="picker admin usage">
+      <header class="info-head">
+        <strong>用量统计</strong>
+        <small>花费按单价折成人民币元；实际扣费是余额里扣掉的那部分</small>
+        <span class="head-btns"><button @click="refreshUsage()">刷新</button><button @click="us.open = false">关闭</button></span>
+      </header>
+      <div class="us-ctrl">
+        <span class="us-chips"><button v-for="r in RANGES" :key="r.value" type="button" :class="{ on: us.days === r.value }"
+          @click="us.days = r.value">{{ r.label }}</button></span>
+        <ui-select v-if="me.admin && uv && uv.whoOptions.length > 2" v-model="us.who" :options="uv.whoOptions" aria-label="看谁的用量"></ui-select>
+        <span v-else class="us-chips"><button type="button" :class="{ on: !us.who }" @click="us.who = ''">我</button><button type="button"
+          :class="{ on: us.who === 'all' }" @click="us.who = 'all'">所有人</button></span>
+        <small v-if="us.loading && uv" class="us-busy">正在统计…</small>
+      </div>
+      <p v-if="us.error" class="error">{{ us.error }}</p>
+      <p v-if="!uv" class="empty">{{ us.loading ? '正在统计…' : '' }}</p>
+      <div v-else class="us-body" :class="{ busy: us.loading }">
+        <div class="us-kpis"><div v-for="k in uv.kpis" :key="k.k" class="us-kpi"><small>{{ k.k }}</small><b>{{ k.v }}</b></div></div>
+        <section class="us-sec">
+          <header><b>用量曲线</b><span class="us-chips"><button v-for="m in METRICS" :key="m.value" type="button"
+            :class="{ on: us.metric === m.value }" @click="us.metric = m.value">{{ m.label }}</button></span></header>
+          <line-chart :series="uv.line" :t0="us.data.t0" :step="us.data.step" :fmt="uv.lineFmt" :height="160"
+                      :idle="`每小时的${METRICS.find(m => m.value === us.metric).label}`"></line-chart>
+        </section>
+        <section class="us-sec">
+          <header><b>一天里什么时候用</b><small>每个钟点占这段时间花费的百分之几</small></header>
+          <bar-chart :labels="uv.clock.labels" :series="uv.clock.series" :fmt="v => v.toFixed(1) + '%'" :every="6" :height="80"></bar-chart>
+        </section>
+        <section class="us-sec">
+          <header><b>典型的一次请求</b><small>中位数，括号里是中间一半请求的范围</small></header>
+          <div class="us-typ">
+            <div class="us-typ-row us-typ-head"><span></span><span><i class="lc-key me"></i>{{ uv.meLabel }}</span><span
+              v-if="uv.othLabel"><i class="lc-key pool"></i>{{ uv.othLabel }}</span></div>
+            <div v-for="t in uv.typ" :key="t.k" class="us-typ-row"><span>{{ t.label }}</span>
+              <span class="us-tb"><i class="me" :style="{ width: t.wa + '%' }"></i><b>{{ tokText(t.a?.[1]) }}</b><small
+                v-if="t.a">{{ tokText(t.a[0]) }}–{{ tokText(t.a[2]) }}</small></span>
+              <span v-if="uv.othLabel" class="us-tb"><i class="pool" :style="{ width: t.wb + '%' }"></i><b>{{ tokText(t.b?.[1]) }}</b><small
+                v-if="t.b">{{ tokText(t.b[0]) }}–{{ tokText(t.b[2]) }}</small></span></div>
+          </div>
+        </section>
+        <section class="us-sec">
+          <header><b>三种 token 的分布</b><span class="us-chips"><button v-for="k in ['cw', 'cr', 'out']" :key="k" type="button"
+            :class="{ on: us.tok === k }" @click="us.tok = k">{{ TOK_LABEL[k] }}</button></span></header>
+          <bar-chart :labels="uv.hist.labels" :series="uv.hist.series" :fmt="v => v.toFixed(1) + '% 的请求'" :every="uv.hist.every" :height="90"
+                     idle="一次请求里有多少，各档占请求的百分之几"></bar-chart>
+        </section>
+        <section v-if="uv.mix.length" class="us-sec">
+          <header><b>输入里的缓存</b><small>这段时间的输入 token 各占多少；输出共 {{ tokText(uv.out) }}</small></header>
+          <div class="us-mix"><i v-for="m in uv.mix" :key="m.k" :class="'mix-' + m.k" :style="{ width: m.w + '%' }"></i></div>
+          <div class="us-mix-key"><span v-for="m in uv.mix" :key="m.k"><i class="lc-key" :class="'mix-' + m.k"></i>{{ m.label }} {{ m.w.toFixed(1) }}%</span></div>
+        </section>
+        <div class="us-two">
+          <section class="us-sec">
+            <header><b>按模型</b></header>
+            <div v-for="m in uv.models" :key="m.model" class="us-hrow"><span>{{ m.label }}</span><i><i :style="{ width: m.w + '%' }"></i></i><b>{{ money(m.full) }}</b><small>{{ m.n }} 次</small></div>
+            <p v-if="!uv.models.length" class="us-none">这段时间没有请求</p>
+          </section>
+          <section class="us-sec">
+            <header><b>按号</b></header>
+            <div v-for="a in uv.accounts" :key="a.account" class="us-hrow"><span>{{ a.account === '?' ? '未记录' : a.account }}</span><i><i
+              :style="{ width: a.w + '%' }"></i></i><b>{{ money(a.full) }}</b><small>{{ a.n }} 次</small></div>
+            <p v-if="!uv.accounts.length" class="us-none">这段时间没有请求</p>
+          </section>
+        </div>
+        <section class="us-sec">
+          <header><b>会话</b><small>{{ uv.sess.count }} 个会话<template v-if="uv.sess.count">，每个会话请求 {{ uv.sess.callsPer[1] }} 次、花 {{ money(uv.sess.costPer[1]) }}（中位）</template><template
+            v-if="!uv.all && uv.othSess.count">；其他人的会话 {{ uv.othSess.callsPer[1] }} 次、{{ money(uv.othSess.costPer[1]) }}</template></small></header>
+          <div v-for="s in uv.sess.top || []" :key="s.sid" class="us-hrow us-sess"><span>{{ s.title || '未命名会话' }}</span><b>{{ money(s.full) }}</b><small>{{ s.n }} 次 · {{ ago(s.last) }}</small></div>
+        </section>
+        <section v-if="uv.users.length" class="us-sec">
+          <header><b>每个人</b><small>只有查看器账号看得到，点名字看这个人的统计</small></header>
+          <button v-for="u in uv.users" :key="u.name || '-'" type="button" class="us-hrow" :class="{ on: u.name === us.data.who }"
+                  @click="u.name && (us.who = u.name === me.name ? '' : u.name)"><span>{{ u.name || '无主会话' }}</span><i><i
+                  :style="{ width: u.w + '%' }"></i></i><b>{{ money(u.full) }}</b><small>{{ u.n }} 次</small></button>
+        </section>
+      </div>
     </section>
   </div>
 

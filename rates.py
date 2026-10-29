@@ -25,6 +25,49 @@ GPT_PRICE = 0.3
 # 表里的元乘 YUAN 换成点，收钱时再乘 PRICE，界面上写的分（× FEN）正好是官方价 × 100
 FEN = 5
 YUAN = 100 / FEN / PRICE
+# 空悲切的固定 Opus 5.5 渠道回包出现过点号写法；只共用已配置的账号价，不改变请求或原始模型名。
+RESPONSE_PRICE_ALIASES = {'blanka': {'claude-opus-5.5': 'claude-opus-5-5'}}
+
+
+def api_price(account, model):
+    config = API.get(account, {})
+    bare = (model or '').split('@account=')[0].split('[')[0]
+    priced = RESPONSE_PRICE_ALIASES.get(config.get('vendor'), {}).get(bare, bare)
+    return config.get('rates', {}).get(priced)
+
+
+# 长上下文分档（2026-10-29 起，空悲切的 GPT-6 Astra）：号的单价里多写一段 "long": {"over": 门槛, in, out, cr, cw, 有一小时价再写 cw1h}，
+# 一次调用的完整输入（未命中输入 + 缓存写入 + 缓存命中）超过门槛，这一整笔都按长档的单价算，和平台「完整输入长度 ≤ 272K 为 standard」一致。
+# 门槛按 token 个数写（272K 写 272000，平台没说 K 是 1000 还是 1024，按 1000 算）
+def whole_input(use) -> int:
+    return (use.get("in") or 0) + (use.get("cw") or 0) + (use.get("cr") or 0)
+
+
+def tier_row(row: dict, use) -> dict:
+    """号配置里的原始单价（元 / 百万 token）按这次调用的完整输入选档：超过门槛用 long 那一段，没有分档或没超就是原样。"""
+    long = row.get("long")
+    return long if long and use is not None and whole_input(use) > long["over"] else row
+
+
+def tiered(r: dict, use) -> dict:
+    """load 出来的单价表里的一行按这次调用选档（长档的几项存成 long_in 这样的键，门槛是 over）。"""
+    if r and "over" in r and use is not None and whole_input(use) > r["over"]:
+        return {**r, **{k: r["long_" + k] for k in (*KEYS, "cw1h") if "long_" + k in r}}
+    return r
+
+
+def _check_long(account, model, row):
+    long = row.get("long")
+    if long is None:
+        return
+    if not isinstance(long, dict) or not isinstance(long.get("over"), int) or long["over"] <= 0 or any(k not in long for k in KEYS):
+        raise ValueError(f"{account} 的 {model} 长上下文单价要写 over（正整数 token 数）和 in、out、cr、cw")
+
+
+def sub_gpt(key: str) -> bool:
+    """按订阅 GPT 号的口径计价的 GPT 模型（额度换算、收钱再打 GPT_PRICE 的折）。号自己配了价的（中转站的 gpt-6-astra@account=api2，
+    2026-10-29 起）按平台标价收，不吃这个折。"""
+    return is_gpt_model(key) and "@account=" not in key
 
 
 def load(price: bool = False) -> dict[str, dict]:
@@ -48,18 +91,36 @@ def load(price: bool = False) -> dict[str, dict]:
     # 中转和订阅可以返回同一个模型名：账号价单独建计价键，绝不覆盖订阅的单价。
     for account, config in API.items():
         for model, row in config.get("rates", {}).items():
+            _check_long(account, model, row)
+            long = row.get("long")
             out[billing_model(model, account)] = {**{k: row[k] * YUAN for k in KEYS},
                                                 **({"cw1h": (row["cw1h"] - row["cw"]) * YUAN} if "cw1h" in row else {}),
-                                                **({"yuan": YUAN, "estimate_only": 1} if config.get("cost_audit") else {})}
+                                                **({"over": long["over"], **{"long_" + k: long[k] * YUAN for k in KEYS},
+                                                    **({"long_cw1h": (long["cw1h"] - long["cw"]) * YUAN} if "cw1h" in long else {})}
+                                                   if long else {}),
+                                                'yuan': YUAN,
+                                                **({"estimate_only": 1} if config.get("cost_audit") else {})}
+        for alias, model in RESPONSE_PRICE_ALIASES.get(config.get('vendor'), {}).items():
+            if model in config.get('rates', {}):
+                out[f'{alias}@account={account}'] = dict(out[billing_model(model, account)])
+    # 智谱等原生 API 模型也能按远端实扣展示；换算只作用于金额，不再按峰谷乘一遍。
+    for model, row in out.items():
+        if is_api_model(model):
+            row['yuan'] = YUAN
+        elif sub_gpt(model):
+            # 远端统一结算的 GPT 号也按那边已折扣的金额展示：收钱的表要再乘 GPT_PRICE，这里先除掉，免得金额被打两次折
+            row['yuan'] = YUAN / GPT_PRICE
     if price:
-        out = {k: {f: value * PRICE * (GPT_PRICE if is_gpt_model(k) else 1) for f, value in v.items()} for k, v in out.items()}
+        # 门槛 over 是 token 个数，不是钱，不乘
+        out = {k: {f: value if f == "over" else value * PRICE * (GPT_PRICE if sub_gpt(k) else 1) for f, value in v.items()}
+               for k, v in out.items()}
     return out
 
 
 def billing_model(model: str, account: str | None) -> str:
     """只给统计用的模型名加账号后缀；发给上游的模型名和原始记录不改。"""
-    bare = (model or "").split("[")[0]
-    if bare in API.get(account, {}).get("rates", {}):
+    bare = (model or "").split('@account=')[0].split("[")[0]
+    if api_price(account, bare) is not None:
         return f"{bare}@account={account}"
     return model
 
@@ -77,7 +138,7 @@ def rate(table: dict, model: str) -> dict | None:
 
 def cost(table: dict, c: dict) -> float:
     """一次调用（{model, use}）按这张单价表合多少点；没有单价的模型是 0。"""
-    r = rate(table, c["model"])
+    r = tiered(rate(table, c["model"]), c["use"])
     if r and "charge_yuan" in c["use"]:
         return c["use"]["charge_yuan"] * r["yuan"]
     if r and "@account=" in c["model"] and c["use"].get("cw1h", 0) and "cw1h" not in r and not r.get("estimate_only"):

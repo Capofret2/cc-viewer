@@ -1,0 +1,113 @@
+#!/usr/bin/python3 -I
+"""cctodo：用户待办清单的入口。清单是用户工作区里的文件（开头文件 待办.md 和 待办条目/ 里一条一个文件），查看器只记它们在哪。
+只能在网页上开的会话里用，管的是会话主人自己登记的清单。
+  cctodo                                   读默认清单的全文：开头文件，再是全部条目文件（随机顺序），最后是网页上还没写进文件的操作
+  cctodo read <清单名>                      读指定的那份，同上
+  cctodo lists                             列出登记的清单
+  cctodo add <清单名> <设备>:<工作区路径> [--default]   登记一份（设备是门卫里登记的名字，就在查看器这台机器上写「本机」）
+  cctodo default <清单名>                   设成默认
+  cctodo rm <清单名>                        去掉登记（文件不动）
+  cctodo synced <操作编号>... | all          网页上的操作已经写进文件了，标掉
+  cctodo guide                             新建、整理清单的通用建议（条目文件的格式也在里面）
+清单的内容直接改文件；改哪个文件之前先用读文件的工具读它（cctodo 的输出不算读过）。
+"""
+# 上面那段是 --help 打印给会话里的 AI 看的，只写用法。服务端是查看器的 todos.py，经人设卡接口的套接字（personas.py，op=todo）：
+# 靠内核报来的进程号认出是哪个会话、主人是谁；套接字地址和 ccpersona 一样经环境变量 CC_VIEWER_PERSONA 给。
+# 参数原样交给服务端解析，这里只把 --body 的文件读好（文件在 Claude 那边，查看器可能读不到）
+import json
+import os
+import re
+import socket
+import sys
+import tempfile
+import time
+
+# Claude Code 一次工具输出大约 3 万字就截断、整份存成文件只给 AI 看开头（AI 只好再去读那个文件）。
+# 超过这么多就由这里自己存成文件、只说一句去读，每次都是同一种走法，也不会让 AI 以为看了开头就是读完了。
+# 按 UTF-8 字节算（Claude Code 按字节截，中文一个字三个字节；按字数比，46 KB 的输出才一万多字，照样被截），留出余量
+LIMIT = 20000
+
+
+def spill(out: str) -> str:
+    """太长的输出存进临时目录里的文件（0600，别的系统用户读不到；共用环境里同一个系统用户的会话照样读得到，和会话记录一样），
+    返回给 AI 的那句说明。AI 拿到就读，一小时以前存的旧文件顺手清掉，不多留。"""
+    d = tempfile.gettempdir()
+    for name in os.listdir(d):
+        p = os.path.join(d, name)
+        try:
+            if name.startswith("cctodo-") and time.time() - os.stat(p).st_mtime > 3600:
+                os.unlink(p)
+        except OSError:
+            pass
+    fd, path = tempfile.mkstemp(prefix="cctodo-", suffix=".md")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(out)
+    m = re.search(r"全部 (\d+) 个条目", out)
+    n = f"，一共 {m.group(1)} 个条目（每个条目前面有「===== 条目 k/{m.group(1)}」）" if m else ""
+    return (f"输出有 {len(out)} 字，超过一次工具输出的上限，全文存进了 {path}{n}。\n"
+            "用读文件的工具把它从头读到尾，一次读不下就按行分段接着读，直到最后一行；全部读完、照里面的说明去做，再回答用户。\n")
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("-h", "--help", "help"):   # 不带参数就是读默认清单
+        print(__doc__.strip())
+        return 0
+    req = {"op": "todo", "argv": argv}
+    if "--body" in argv:
+        i = argv.index("--body")
+        if i + 1 >= len(argv):
+            print("cctodo：--body 后面要跟一个文件（- 从标准输入读）", file=sys.stderr)
+            return 2
+        path = argv[i + 1]
+        try:
+            if path == "-":
+                req["body"] = sys.stdin.read()
+            else:
+                with open(path, encoding="utf-8") as f:
+                    req["body"] = f.read()
+        except OSError as e:
+            print(f"cctodo：读不了 {path}：{e.strerror}", file=sys.stderr)
+            return 2
+        except UnicodeDecodeError:
+            print(f"cctodo：{path} 不是 UTF-8 文本", file=sys.stderr)
+            return 2
+        req["argv"] = argv[:i] + argv[i + 2:]
+    path = os.environ.get("CC_VIEWER_PERSONA")
+    if not path:
+        print("cctodo：只能在网页上开的会话里使用（这个会话里找不到查看器的接口）", file=sys.stderr)
+        return 2
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(20)
+    try:
+        s.connect(path)
+        s.sendall(json.dumps(req, ensure_ascii=False).encode() + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 16)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as e:
+        print(f"cctodo：连不上查看器的接口（{path}：{e}），网页查看器可能正在重启，过一会儿再试", file=sys.stderr)
+        return 1
+    finally:
+        s.close()
+    try:
+        r = json.loads(buf)
+    except ValueError:
+        print("cctodo：查看器的接口没回话就断开了", file=sys.stderr)
+        return 1
+    out = r.get("out", "")
+    if len(out.encode()) > LIMIT:
+        try:
+            out = spill(out)
+        except OSError as e:   # 存不下来就照原样打出来，由 Claude Code 自己截断存文件
+            print(f"cctodo：全文存不进临时文件（{e}），下面照原样输出，可能被截断", file=sys.stderr)
+    sys.stdout.write(out)
+    sys.stderr.write(r.get("err", "").replace("ccpersona：", "cctodo：", 1))
+    return int(r.get("exit", 1))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

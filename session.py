@@ -12,6 +12,7 @@ import api_calls   # 每条回复是哪个号发的：API 号的思考是明文�
 import calls   # 每次调用的四个数怎么取、怎么合并：和账本、拟合同一份
 import memtrim
 import peak   # 按时段计价的模型：空闲时段的调用换成单价表里那一条的名字
+import review_board   # 自动审稿的会话：工具结果里认 review.py 打印的工作区（见 on_user）
 from hostfs import Path   # 会话记录在运行 Claude 的那个用户名下，经它读（见 hostfs.py）
 from instance import API, CALL   # API 号的登记；界面上怎么称呼用查看器的人（见 instance.py）
 
@@ -225,6 +226,11 @@ class Session:
                 item = {"kind": "result", "id": b.get("tool_use_id"),
                         "text": clip(block_text([x for x in body if not is_image(x)] if shots else body)),
                         "error": bool(b.get("is_error"))}
+                # 自动审稿：review.py 第一行打印审稿工作区，记进会话信息，前端据此给这个会话「审稿看板」的入口（review_board.py）。
+                # 最近用的排最后，看板默认打开它
+                if not self.dup and (ws := review_board.ws_from_result(item["text"])):
+                    seen = [w for w in self.info.get("reviewWs") or [] if w != ws]
+                    self.info["reviewWs"] = seen + [ws]
                 # Read 的结果另外记着读了几行、文件一共几行（结果文本可能被截断，不能靠它数）
                 tur = e.get("toolUseResult")
                 if isinstance(tur, dict) and isinstance(tur.get("file"), dict) and "numLines" in tur["file"]:
@@ -379,9 +385,10 @@ class Session:
                 tokens = ds_tokens(t) if (msg.get("model") or "").startswith("deepseek-") else None
                 self.add({"kind": "thinking", "text": clip(t), "tokens": tokens, **meta}, e)
             # CC 不把真正的思考写进记录（思考块是空的）；带字的思考块装的是说给用户听的过渡话，算回复，
-            # 不然用户折叠思考时它们会跟着被藏掉
+            # 不然用户折叠思考时它们会跟着被藏掉。标上 thought：工作过程里的正文够长就露在外面（item-row.js 的 TALK_CHARS），
+            # 只数真正的正文块，这些过渡话和英文的内心独白不算
             elif kind == "thinking" and (b.get("thinking") or "").strip():
-                self.add({"kind": "text", "text": b["thinking"], **meta}, e)
+                self.add({"kind": "text", "text": b["thinking"], "thought": True, **meta}, e)
             elif kind in ("thinking", "redacted_thinking"):
                 self.add({"kind": "thinking", "text": clip(b.get("thinking", "")), **meta}, e)
             elif kind in ("tool_use", "server_tool_use"):

@@ -293,13 +293,15 @@ export function useDevices({ askClaude, meReady }) {
   // 新会话标签页先记在标签页上（tab.workOff），发第一句话时交给服务器；已有的会话一改就交给服务器（POST /api/tabs/{id}/devices）
   const CLOUD = 'Local';
   // 有没有工作设备这一项：开了门卫、登录了、后端认得（/api/devices 给了 work）；已有的会话还要是自己的、快照里有 workOff。
-  // 单用户实例里会话不记会话主人（owner 是 null），都是这一个人的
+  // 单用户实例里会话不记所属用户（owner 是 null），都是这一个人的
   const workMine = tab => tab.owner === me.name || (!me.multi && !!me.name);
   const workShown = tab => !!(tab && me.devices && dev.work && (tab.fresh || ('workOff' in tab && workMine(tab))));
   const workOn = (tab, name) => !(tab.workOff || []).includes(name);
   // 小标签上写「Remotes · 勾上的远程设备几台」，不算一直在的 Local
+  // 底下那排放不下时只写图标加台数（workCount，app.js 的 fitTools）
+  const workCount = tab => dev.devices.filter(d => workOn(tab, d.name)).length;
   function workText(tab) {
-    return `Remotes · ${dev.devices.filter(d => workOn(tab, d.name)).length}`;
+    return `Remotes · ${workCount(tab)}`;
   }
   async function toggleWork(tab, d) {
     if (dev.workBusy) return;
@@ -317,7 +319,7 @@ export function useDevices({ askClaude, meReady }) {
   const devDot = computed(() => !!(me.devices && dev.loaded && !dev.devices.length));
 
   return {
-    workMine, workShown, workOn, workText, toggleWork, devDot, CLOUD,
+    workMine, workShown, workOn, workText, workCount, toggleWork, devDot, CLOUD,
     dev, loadDevices, openDevices, openDevice, addDevice, closeDevices, devBack, addPc, openLink, linkCmd, linkLeft, linkOk, linkBad, linkSteps, copyCmd,
     devState, devDesc, histWho, lastText, addedText, pendingIcon, pendingText, toggleDev, testDev, pauseDev, startEdit, saveEdit, askDelete, doDelete,
     copyUninstall, addServer, keyCmd, copyKeyCmd, saveServer, askLink, askClaudeDev, devTitle, HOWTO, OS_LABEL, UNINSTALL,

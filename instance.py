@@ -78,6 +78,13 @@
   表示翻译层在本机、直接经闸门连（不靠 .bashrc 别名）。
 - 回忆搜索：recall 写 true，共用环境里查看器账号的网页会话在系统提示词里多一段 sessions.py grep 的用法（chat.VIEWER_RECALL）。
   只有 Claude 以跑查看器的这个用户运行时才能用这个脚本（它要读查看器的数据目录），分了 run_as 的实例不要写。
+- 普通用户回忆：recall_users 写 true，共用环境里会话主人不是查看器账号的网页会话在系统提示词里多一段 ccrecall 的用法
+  （chat.VIEWER_RECALL_USER），ccrecall 经人设卡接口的套接字由查看器以自己的身份只搜本实例里主人是他的会话（sessions.serve_request）。
+  不写就不给说明，普通用户敲 ccrecall 会被拒；查看器账号敲 ccrecall 不受它限制（搜本实例全部会话），系统提示词里照旧只有上面那段。
+- 待办共用：todos_shared 写成 {"file": "/绝对路径/todos.json", "users": {"网页账号": "共用文件里的名字"}}，
+  这几个网页账号的待办不存本实例的数据目录，存进那份共用文件里右边那个名字底下；两个实例写同一个文件、同一个名字，就是同一份（见 todos.py）。
+- 频道：channels 写成 {"file": "/绝对路径/channels.json"}，会话之间的群聊存在这份文件里；两个实例写同一份就互通
+  （目录要给两边的系统用户开 ACL，见 channels.py）。不写就不开频道。
 只用标准库：状态栏脚本、只读模式下都能放心导入。
 """
 import json
@@ -142,6 +149,9 @@ GW_SOCKET: str | None = _conf.get("gw_socket")
 INSTRUCTIONS: str | None = _conf.get("instructions")       # 共用环境注入的说明（见开头）
 PERSONA_SOCKET: str | None = _conf.get("persona_socket")   # ccpersona 的套接字（见开头）
 RECALL: bool = bool(_conf.get("recall"))                    # 提示词里给不给回忆搜索的用法（见开头）
+RECALL_USERS: bool = bool(_conf.get("recall_users"))        # 普通用户能不能用 ccrecall 回忆自己的会话（见开头）
+TODOS_SHARED: dict | None = _conf.get("todos_shared")       # 待办共用的文件和账号对应（见开头）
+CHANNELS: dict | None = _conf.get("channels")               # 频道存在哪份文件（见开头）
 # 运行 Claude 的那个用户的家目录。没分 run_as 时按环境变量 HOME 来
 HOME: str = pwd.getpwnam(RUN_AS).pw_dir if RUN_AS else str(Path.home())
 
@@ -200,12 +210,24 @@ REMOTE: dict[str, dict] = {}
 for _name, _r in _remote.items():
     _r = _r if isinstance(_r, dict) else {}
     _url, _key = _r.get("url"), _r.get("key_file")
-    if _name in ACCOUNTS or not isinstance(_url, str) or not _url.startswith("http://127.0.0.1:"):
+    _upstream = _r.get('billing') == 'upstream'
+    # 远端统一结算的号沿用本机同名的 API 号或 GPT 号配置（模型、历史单价），所以可以和账号表同名
+    _metered = _name in (_conf.get('api') or {}) or _name in (_conf.get('gpt') or {})
+    if (_name in ACCOUNTS and not (_upstream and _metered)) or not isinstance(_url, str) or not re.fullmatch(r'http://127\.0\.0\.1:[0-9]+', _url):
         raise ValueError(f"远端回环 {_name} 名称重复，或者 url 不是本机 http 地址")
+    if _upstream:
+        if not _metered or _name in (_conf.get('remote_gpt') or []) or not _r.get('account') or not _r.get('user'):
+            raise ValueError(f'{_name} 远端结算必须是 API 号或 GPT 号（不能同时写在 remote_gpt 里），并指定固定账号和本地使用者')
     if not isinstance(_key, str) or not _key.startswith("/"):
         raise ValueError(f"远端回环 {_name} 的 key_file 必须是绝对路径")
-    REMOTE[_name] = {"account": str(_r.get("account") or ""), "url": _url, "key_file": _key}
-    ACCOUNTS[_name] = None
+    REMOTE[_name] = {"account": str(_r.get("account") or ""), "url": _url, "key_file": _key,
+                     **({'billing': 'upstream', 'user': str(_r['user'])} if _upstream else {})}
+    ACCOUNTS.setdefault(_name, None)
+
+
+def remote_billed(account):
+    """当前路由是否在上游结算；历史归属按每条调用的来源判断，不能靠安装配置的时刻划线。"""
+    return REMOTE.get(account, {}).get('billing') == 'upstream'
 
 
 # 限量号：没写进 free 的号全是（回环跟着底层的号走）
@@ -294,10 +316,12 @@ API: dict[str, dict] = {a: {**g, "key_file": str(Path(g["key_file"]).expanduser(
 # DeepSeek 只接了 Flash；[1m] 让 Claude Code 按 1M 上下文算（官方接入说明就这样写），记录里回的模型名不带它
 # 智谱只接 GLM-5.3：子代理、后台小模型也用它（不用 Flash），单价表只有一个模型要定
 API_MODELS: dict[str, tuple[str, ...]] = {"deepseek": ("deepseek-flash[1m]",), "glm": ("glm-5.3[1m]",)}
-# 中转站：转 Claude 模型的 Anthropic 兼容平台，加一个新站只写配置、不改代码。号的配置里写
+# 中转站：Anthropic 兼容接口的转发平台，加一个新站只写配置、不改代码。号的配置里写
 # {"vendor": "<站名，小写字母开头>", "relay": {"name": 界面上的平台名, "host": 主站域名, "prefix": 接口路径前缀（没有就不写）,
 #  "models": [能选的模型，第一个是默认], "labels": {模型: 下拉里的名字}}, "key_file", "rates", 需要时再写 model_overrides、cache_ttl、cost_audit}。
 # vendor 同时是这个号的「家」（account_family）：同一家的号之间才能换，不同站的号互不顶替，和订阅号也不混。
+# 一个站可以接好几家的模型：Claude、Gemini、GPT 模型都认，下拉里一律写模型本来的名字，不写站内渠道（渠道名只在 model_overrides 里）
+RELAY_MODEL_PREFIXES = ("claude-", "gemini-", "gpt-")
 RELAY: dict[str, dict] = {}   # 中转站的号 → {name, host, prefix, models, labels}
 for _a, _g in API.items():
     _v = _g.get("vendor")
@@ -314,12 +338,24 @@ for _a, _g in API.items():
         raise ValueError(f"{_a} 的 relay.host 写的是 {_r['host']!r}，只写域名（不带 https:// 和路径）")
     if _r["prefix"] and not re.fullmatch(r"(/[A-Za-z0-9_.-]+)+", _r["prefix"]):
         raise ValueError(f"{_a} 的 relay.prefix 写的是 {_r['prefix']!r}，要以 / 开头、结尾不带 /")
-    if not _r.get("models") or not all(isinstance(m, str) and m.startswith("claude-") for m in _r["models"]):
-        raise ValueError(f"{_a} 的 relay.models 要写至少一个 claude- 开头的模型")
+    if not _r.get("models") or not all(isinstance(m, str) and m.startswith(RELAY_MODEL_PREFIXES) for m in _r["models"]):
+        raise ValueError(f"{_a} 的 relay.models 要写至少一个模型，只认 {' 或 '.join(RELAY_MODEL_PREFIXES)} 开头的")
     # 没有单价的模型不许用（rates.unpriced），加号时漏写单价就在启动时说清楚，不等到发话才拦
     if _missing := [m for m in _r["models"] if m.split("[")[0] not in (_g.get("rates") or {})]:
         raise ValueError(f"{_a} 的 rates 里没有 {'、'.join(_missing)} 的单价")
     RELAY[_a] = {k: _r[k] for k in ("name", "host", "prefix", "models", "labels")}
+# 同一站的第二把令牌（2026-10-30 起，IKun 的 gemini 分组）：站内分组隔开模型目录，一把钥匙进不了两个组，只能一站两个号。
+# present_as 把并进来的号藏到主号名下（选号列表、账号面板都不列），主号的 model_keys 把某些模型指到拿另一把钥匙的号上，
+# 闸门按模型换钥匙（api_relay.model_body），计价、对账、统计都只认发起的那个号，用户看到的始终是一家。
+PRESENT_AS: dict[str, str] = {a: g["present_as"] for a, g in API.items() if g.get("present_as")}
+for _a, _p in PRESENT_AS.items():
+    if _p not in API or _p in PRESENT_AS or API[_a]["vendor"] != API[_p]["vendor"]:
+        raise ValueError(f"{_a} 的 present_as 指到 {_p}：要指同一家（vendor 相同）的另一个号，不能互相指或指自己")
+for _a, _g in API.items():
+    for _m, _h in (_g.get("model_keys") or {}).items():
+        if PRESENT_AS.get(_h) != _a and PRESENT_AS.get(_a) != _h \
+           or _m not in RELAY.get(_a, {}).get("models", []) or _m not in RELAY.get(_h, {}).get("models", []):
+            raise ValueError(f"{_a} 的 model_keys 把 {_m} 指到 {_h}：{_h} 和 {_a} 要用 present_as 并成一家，两边的 relay.models 都要有这个模型")
 
 
 def api_models(account: str) -> tuple[str, ...]:
@@ -328,10 +364,12 @@ def api_models(account: str) -> tuple[str, ...]:
 
 
 def model_family(model: str | None) -> str:
-    """模型是哪一家的：gpt、deepseek、glm（智谱），其余都算 claude。号只能用自家的模型（server.run_model）。
-    API 号的家名就是 instance.json 里 vendor 写的那个（account_family）。"""
+    """模型是哪一家的：gpt、deepseek、glm（智谱）、gemini，其余都算 claude。号只能用自家的模型（server.run_model）。
+    API 号的家名就是 instance.json 里 vendor 写的那个（account_family）。Gemini 模型只经中转站用（中转站按号接了哪几个认，不看这里），
+    单列一家是为了别的号不会把它当成 Claude 模型带上：从中转站换到订阅号时，选着的 Gemini 会退回订阅号的默认模型"""
     m = model or ""
-    return "gpt" if m.startswith("gpt-") else "deepseek" if m.startswith("deepseek-") else "glm" if m.startswith("glm-") else "claude"
+    return ("gpt" if m.startswith("gpt-") else "deepseek" if m.startswith("deepseek-") else "glm" if m.startswith("glm-")
+            else "gemini" if m.startswith("gemini-") else "claude")
 
 
 def account_family(account: str | None) -> str:

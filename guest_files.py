@@ -16,8 +16,9 @@ import instance
 
 CODE = Path(__file__).resolve().parent
 # 文件 → 要的权限（r 读、x 运行）。都是 Claude 那边直接用到的：拉起 CLI 的启动脚本、hostfs 的读写小助手、
-# 集中登录的 apiKeyHelper、人设卡钩子，以及会话里会敲的 ccssh、ccpersona、ccname、ccrun 和实验脚本导入的包装 SDK
+# 集中登录的 apiKeyHelper、人设卡钩子，以及会话里会敲的 ccssh、ccpersona、ccname、cctodo、ccchan、ccrecall、ccrun、ccagent 和实验脚本导入的包装 SDK
 NEED = {
+    "ccagent": "rx",
     "claude_via_bashrc.sh": "rx",
     "hostfs_helper.py": "r",
     "cc_auth_helper.py": "r",
@@ -25,12 +26,17 @@ NEED = {
     "ccssh": "rx",
     "ccpersona": "rx",
     "ccname": "rx",
+    "cctodo": "rx",
+    "ccchan": "rx",
+    "ccrecall": "rx",
     "ccrun": "rx",
     # 包装 SDK（实验脚本 import ccviewer_sdk）：目录上设了 RUN_AS 的默认权限，新文件会带上，改写过的文件照样要查
     "sdk_client": "rx",
     "sdk_client/ccviewer_sdk": "rx",
     "sdk_client/ccviewer_sdk/__init__.py": "r",
     "sdk_client/ccviewer_sdk/_client.py": "r",
+    # 会话记录存档（2026-10-29）：ccguest 的 crontab 每 10 分钟以 python3 -I 跑它，读不到就停了存档、只在它的 archive.log 里报错
+    "archive_transcripts.py": "r",
 }
 
 

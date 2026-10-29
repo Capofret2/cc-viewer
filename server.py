@@ -55,12 +55,17 @@ import isolation
 import devices   # 「设备」页：每人自己的设备列表、添加电脑和服务器（见 devices.py）
 import personas  # 人设卡和注入的说明（见 personas.py）
 import naming    # 会话的名字是谁起的、会话里的 AI 给自己的会话起名（见 naming.py）
+import todos     # 待办清单，网页上的待办页和会话里的 cctodo 改同一份（见 todos.py）
+import voice     # 讯飞语音输入：各人的服务和密钥、给浏览器签连接地址（见 voice.py）
+import summaries  # 会话摘要：闲了 45 分钟从主会话分叉出去写（见 summaries.py、下面的 summary_loop）
+import review_board  # 自动审稿会话的审稿看板（见 review_board.py）
 import workflows  # 本机工作流：任务归属、队列和执行，复用人设卡套接字认人
 import sshgw
 import workdev   # 会话勾选的工作设备（见 workdev.py）
 import inbox   # Claude 那边的状态栏脚本记下的额度和调用，收进自己的数据目录
 import rates   # 点数单价
 import users   # 用户、会话的主人和可见范围、额度账本
+import stats   # 账号页的余额曲线、我的号、用量统计（只读，见 stats.py）
 import reserve   # 预定额度、预测拦截要用的算法
 import gate   # 网络闸门：预测拦截拦下以后，CLI 一次请求都发不出去
 import api_relay   # API 号（DeepSeek）：哪一家、接口在哪
@@ -73,7 +78,7 @@ from datetime import datetime, timedelta
 from instance import CALL, DATA, FIVE_IN_WEEK, PAID, PROXIES, SHARE_URL   # 运行时小文件一律写在 DATA（见 instance.py），代码目录只放代码和前端
 from instance import GPT, GPT_MODELS, WEEK_ONLY, five_in_week, is_gpt_model   # GPT 号（经本机翻译层用 ChatGPT 订阅的 Claude Code）
 # API 号（DeepSeek，按 token 付费，请求经闸门补上密钥，见 api_relay.py）；模型分几家，号只能用自家的
-from instance import API, API_MODELS, RELAY, account_family, api_models, model_family
+from instance import API, API_MODELS, PRESENT_AS, RELAY, account_family, api_models, model_family
 from instance import NO_RESERVE   # 不开放预定的号：号主打开面板只给折扣（reserve_plan）
 from instance import EXPIRES, week_end   # 号的到期时间，额度接口一并给前端（倒计时取重置和到期里早的那个）；挑号按 week_end 排
 from instance import owns   # 号主用自己的号不按余额拦，还能关掉别人的预定、撤销自己的单
@@ -295,6 +300,8 @@ class Tab:
                "settingsEffort": settings_effort(self.account, env) if env else None,
                # 建会话时选的人设卡（personas.py 的快照），看板上写着；没选是 None
                "persona": (card := personas.of_session(self.sid)) and card["name"],
+               # 跑过自动审稿 review.py 的工作区（session.py 认出来的，最近的在最后）。总是带上这个键：前端靠它知道后端有审稿看板
+               "reviewWs": s.info.get("reviewWs") or [],
                # 这个会话取消勾选的工作设备（workdev.py），其余登记了的都能用。没开门卫就没有这个键，前端不显示
                **({"workOff": workdev.off(self.sid)} if devices.ENABLED else {}),
                **self.spent(),                          # 总消耗和其中进账本的，前端换算成点数、分两种颜色写
@@ -1102,6 +1109,7 @@ async def lifespan(_):
         except OSError as e:
             print(f"ssh 门卫起不来（{e}），会话里的 ccssh 用不了", flush=True)
         await workflows.start(sys.modules[__name__])
+        summary_tasks.add(asyncio.create_task(summary_loop()))   # 会话摘要的后台清点（summaries.py）
         personas.drivers = lambda: list(chat.LIVE)   # 人设卡接口 ccpersona：认人和门卫一样（见 personas.py）
         try:
             personas.start(config.port)
@@ -1118,7 +1126,7 @@ async def lifespan(_):
     await asyncio.to_thread(platform_costs.ensure_prices)
     task = asyncio.create_task(watch())
     lag = asyncio.create_task(watch_loop_lag())
-    cost_poll = asyncio.create_task(platform_costs.poll()) if not config.readonly and platform_costs.accounts() else None
+    cost_poll = asyncio.create_task(platform_costs.poll()) if not config.readonly and (platform_costs.accounts() or any(r.get('billing') == 'upstream' for r in REMOTE.values())) else None
     stop_watchdog = threading.Event()
     threading.Thread(target=watchdog, args=(threading.get_ident(), stop_watchdog), name="看门", daemon=True).start()
     yield
@@ -1277,7 +1285,8 @@ def get_config():
                           "relay": {"models": [{"value": m, "label": RELAY[a]["labels"].get(m)} for m in RELAY[a]["models"]]}
                                    if a in RELAY else None,
                           "costAudit": platform_costs.enabled(a),
-                          "apiAccess": a in exposed, "hidden": a in WEB_ENTRIES} for a in ACCOUNTS],
+                          # hidden：界面上不单列的号（API 回环的替代入口、同站第二把令牌 present_as 并进主号名下）
+                          "apiAccess": a in exposed, "hidden": a in WEB_ENTRIES or a in PRESENT_AS} for a in ACCOUNTS],
             "gptModels": GPT_MODELS, "gptAutoMode": GPT_AUTO_MODE, "apiModels": API_MODELS,
             # 单价（rates.py 换算好的、乘过收钱的比例 rates.PRICE，GPT 模型再乘 rates.GPT_PRICE），前端按最长前缀匹配模型名，只用来写花了多少分
             "rates": rates.load(price=True), "multi": users.MULTI,
@@ -1401,6 +1410,13 @@ def web_ranked(me: Who, paid_ok: bool, environment: str | None, family: str = "c
             if web_account(a) not in BANNED]
 
 
+def plain_sub(account: str) -> bool:
+    """共用的 Claude 订阅号（ccNN 这类，连同它的API回环入口）：不是 GPT 号，也不是按 token 付费的 API 号、中转站。
+    个人默认账号只有号主能固定成这种号（set_settings，2026-10-29 主人说的），前端设置页的下拉同一个规矩"""
+    b = base_account(account)
+    return account_family(b) == "claude" and b not in API
+
+
 def check_web_account(account: str):
     if account in WEB_ENTRIES:
         raise HTTPException(400, f"{account} 原生入口已隐藏，请选择 {web_account(account)}")
@@ -1494,16 +1510,23 @@ def get_settings(me: Who = Depends(who)):
             "autoSwitch": users.auto_switch(me) if users.MULTI and me.name else None,
             # bottomTabs：也留着底部标签页栏（users.bottom_tabs），游客没有；旧后端不给，前端照旧没有标签页栏
             "bottomTabs": users.bottom_tabs(me),
+            # voice：讯飞语音输入的配置（voice.info，没配是 {}），游客没有；旧后端不给，前端不出语音按钮和这项设置
+            "voice": voice.info(me), "voiceServices": voice.services(),
             "fallback": web_account(config.account), "canGlobal": me.admin}
+
+
+ACG_SPENT_FEN = 50   # 累计花掉超过 5 毛的人，二次元没切过就开着（2026-10-29 主人说的）
 
 
 def used_features(name: str) -> dict:
     """这个人用过哪几样（users.features 没切过的开关按它定）：能选共用环境（users.uses_shared：名下有共用环境的会话，
-    或者查看器账号给他打开了）、用过人设卡。没用过共用环境的只用独立环境，没建好的页面上自动建（js/sessions.js）。"""
+    或者查看器账号给他打开了）、用过人设卡或者累计花掉超过 ACG_SPENT_FEN 分（二次元）。没用过共用环境的只用独立环境，没建好的页面上自动建（js/sessions.js）。
+    自己在设置里切过二次元的照他切的，花得再多也不改（users.features）。"""
     with users._lock:
         mine = [(sid, r) for sid, r in users.owners.items() if r.get("owner") == name]
     return {"shared": users.uses_shared(name),
-            "persona": personas.used_by(name, [sid for sid, _ in mine])}
+            "persona": personas.used_by(name, [sid for sid, _ in mine])
+                       or users.cached_spent(name) * reserve.FEN > ACG_SPENT_FEN}
 
 
 def my_features(me: Who) -> dict | None:
@@ -1535,6 +1558,30 @@ def set_bottom_tabs(body: ShowTestsBody, me: Who = Depends(who)):
     return {"bottomTabs": users.bottom_tabs(me)}
 
 
+class VoiceBody(BaseModel):
+    service: int
+    appid: str
+    apiKey: str = ""      # 留空沿用已存的
+    apiSecret: str = ""
+
+
+@app.put("/api/voice")
+def put_voice(body: VoiceBody, me: Who = Depends(who)):
+    """保存自己的讯飞语音输入配置（voice.set_keys）"""
+    return {"voice": voice.set_keys(me, body.service, body.appid, body.apiKey, body.apiSecret)}
+
+
+@app.delete("/api/voice")
+def delete_voice(me: Who = Depends(who)):
+    return {"voice": voice.clear(me)}
+
+
+@app.post("/api/voice/sign")
+def sign_voice(me: Who = Depends(who)):
+    """每次开口现签一个连讯飞的地址（voice.sign），浏览器拿它直连讯飞"""
+    return voice.sign(me)
+
+
 class FeatureBody(BaseModel):
     key: str   # users.FEATURES 里的一个
     on: bool
@@ -1559,6 +1606,13 @@ def set_settings(body: SettingsBody, me: Who = Depends(who)):
     check_web_account(want)
     if want and want != AUTO and (want not in ACCOUNTS or want in BANNED):
         raise HTTPException(400, f"{want} 不能设为默认账号：{BANNED.get(want, '账号不存在')}")
+    if want and want != AUTO and EXPIRES.get(base_account(want), math.inf) < time.time():
+        raise HTTPException(400, f"{want} 不能设为默认账号：订阅已到期")
+    # 个人默认账号不能固定成共用的 Claude 订阅号（2026-10-29 主人说的）：大家共用的号额度此起彼伏，固定了反而常常挤在用满的号上，
+    # 选「自动」会挑此刻最宽裕的；自己是号主的号除外。已经设了的不动（选择是用户的数据），只是不能再新设
+    if body.scope == "mine" and want and want != AUTO and plain_sub(want) and not owns(me.name, want) \
+            and want != users.user_default(me):
+        raise HTTPException(400, f"{want} 是共用的订阅号，只有号主可以设为默认账号；选「自动」会挑额度最充足的号")
     if body.scope == "mine":
         users.set_user_default(me, want or None)
         return get_settings(me)
@@ -1750,6 +1804,7 @@ class NewSession(BaseModel):
     remember: bool = False       # 从新会话标签页发的：记下这次选的，下次开新会话标签页照着填（选文件夹新建的对话框不记）
     rememberPersona: bool = True  # 交 False 是这次的卡不记成默认；现在的页面不交了（二次元关着也照样用默认卡），旧页面关了人设卡那一项时还会交
     devicesOff: list[str] = []   # 新会话页上取消勾选的工作设备（workdev.py）；默认什么都不取消，登记了的都能用
+    todos: list[str] = []        # 从待办页勾选了几条发到新会话（todos.py）：建会话时记上从它们开出、替它认领
 
 
 class TitleBody(BaseModel):
@@ -1903,6 +1958,232 @@ async def apply_names():
             why = e.detail if isinstance(e, HTTPException) else f"{type(e).__name__}: {e}"
             if naming.failed(sid, why):
                 print(f"会话 {sid} AI 起的名字「{p['name']}」没写进去：{why}，过一会儿再试", flush=True)
+
+
+# 会话摘要（summaries.py）：后台每 SUMMARY_GAP 秒清点一次，到点的会话从主会话分叉出去写，不进主会话的上下文
+SUMMARY_GAP = 30
+SUMMARY_TAIL = 2 << 20   # 找主会话最后一条回复只读文件末尾这么多字节
+summary_running: set[str] = set()
+summary_tasks: set[asyncio.Task] = set()
+
+
+def _iso_ts(ts: str) -> float | None:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def summary_tail(path: Path) -> tuple[str, str, str] | None:
+    """主会话最后一条真的回复：(时刻, 回复编号, 模型)。侧链、CLI 自己补的 <synthetic> 不算；读文件末尾一段就够。
+    CLI 按内容块一块写一行，最后一行的时刻就是这次调用结束的时候。"""
+    with path.open("rb") as f:
+        size = f.seek(0, 2)
+        f.seek(max(0, size - SUMMARY_TAIL))
+        lines = f.read().splitlines()
+    for raw in reversed(lines):
+        if b'"type":"assistant"' not in raw:
+            continue
+        try:
+            e = json.loads(raw)
+        except ValueError:
+            continue
+        m = e.get("message") or {}
+        if e.get("type") == "assistant" and not e.get("isSidechain") and m.get("id") and m.get("model") != "<synthetic>":
+            return e.get("timestamp") or "", m["id"], m.get("model") or ""
+    return None
+
+
+def summary_candidates(now: float) -> list[dict]:
+    """该写摘要的会话（在线程里跑）：主人在名单里（summaries.USERS）、不是工作流和独立环境、上一次调用结束正好过了 45 分钟，
+    号是做的那几家、和会话现在选的号和模型一样，上下文和调用次数比上次触发多出够多。"""
+    if summaries.broken or config.readonly:
+        return []
+    out = []
+    roots = list(project_roots())
+    snap = calls.snapshot(roots)
+    for root in roots:
+        base = str(root).rstrip("/") + "/"
+        for sid, rel in (snap.mains.get(str(root)) or {}).items():
+            st = snap.stats.get(base + rel)
+            if not st or st[1] < now - summaries.LATE - 60 or sid in summary_running:
+                continue   # 最后一次调用结束不会晚于文件最后修改的时候
+            owner = users.owner_of(sid)
+            if not owner or (summaries.USERS is not None and owner not in summaries.USERS):
+                continue
+            if workflows.is_run(sid) or isolation.for_sid(sid):
+                continue
+            path = root / rel
+            try:
+                tail = summary_tail(path)
+                if not tail or (end := _iso_ts(tail[0])) is None or not summaries.IDLE <= now - end <= summaries.LATE:
+                    continue
+                main = calls.file_calls(path)
+            except OSError:
+                continue
+            ts, mid, model = tail
+            use = (main.get(mid) or {}).get("use") or {}
+            ctx = (use.get("in") or 0) + (use.get("cw") or 0) + (use.get("cr") or 0)
+            account = api_calls.INDEX.account(mid)
+            family = account_family(account) if account else ""
+            if not account or family not in summaries.FAMILIES or summaries.stopped(family):
+                continue
+            tid = tab_id(path)
+            tab = tabs.get(tid)
+            now_account = tab.account if tab else accounts.get(tid)
+            if now_account and base_account(now_account) != base_account(account):
+                continue   # 换过号：缓存在原来的号上，主人说不切号才做
+            if tab and tab.model and tab.model.split("[")[0] != model.split("[")[0]:
+                continue   # 网页上换过模型
+            if not summaries.due(sid, ctx, len(main)):
+                continue
+            out.append({"sid": sid, "path": path, "mtime": st[1], "tid": tid, "owner": owner, "account": account,
+                        "family": family, "model": model, "ctx": ctx, "calls": len(main), "end": ts})
+    return out
+
+
+SummaryDriver = None   # 写摘要的分叉驱动，第一次用时才建：Driver 要等启动时才从 chat 导入（见 summary_driver_class）
+
+
+def summary_driver_class():
+    """写摘要的分叉：选项和主会话一样（缓存才命得中），工具一律拒绝，一轮结束就收。"""
+    global SummaryDriver
+    import chat
+    from claude_agent_sdk import ResultMessage
+
+    class _SummaryDriver(chat.Driver):
+        async def _guard(self, inp, tool_use_id, ctx):
+            out = await super()._guard(inp, tool_use_id, ctx)
+            if out.get("continue_") is False:
+                return out
+            if inp.get("hook_event_name") == "PreToolUse":
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                               "permissionDecisionReason": "现在是在后台写会话摘要，不能调用工具，请直接按要求写出来"}}
+            return out
+
+        async def _serve(self, client, retry):
+            text = await self.inbox.get()
+            self._new_turn()
+            self.turn = True
+            await client.query(text)
+            async for msg in client.receive_response():
+                self._handle(client, msg)
+                if isinstance(msg, ResultMessage):
+                    self.task_result = {"result": msg.result, "usage": msg.usage, "is_error": msg.is_error,
+                                        "stop_reason": msg.stop_reason}
+                    return None
+            raise RuntimeError("运行结束前没有收到结果标记")
+
+    SummaryDriver = _SummaryDriver
+    return SummaryDriver
+
+
+def summary_claim(fork: str, me: Who, base_sid: str):
+    """分叉出来的会话记在原会话主人名下（照常计费），标成工作流：会话列表、搜索、回忆都不显示它。"""
+    users.claim(fork, me, [])
+    with users._lock:
+        if fork in users.owners:
+            users.owners[fork]["workflow"] = {"summary": base_sid}
+            users._save(users.OWNERS_FILE, users.owners)
+
+
+async def summary_run(c: dict):
+    import chat
+    from dataclasses import replace
+    sid, d, summary, why, usage, fork = c["sid"], None, None, "", None, ""
+    extra = {"account": c["account"], "model": c["model"], "ctx": c["ctx"]}
+    try:
+        me = users.Who(c["owner"], c["owner"] in users.ADMINS)
+        tab = tabs.get(c["tid"])
+        account = c["account"]
+        model = launch_model(account, None, tab.model if tab else None)
+        effort = launch_effort((efforts.get(c["tid"]) or {}).get("effort"), account, None, model)
+        mode = run_mode(account, modes.get(c["tid"], DEFAULT_MODE))
+        cwd = await asyncio.to_thread(read_cwd, c["path"], c["mtime"])
+        if not cwd:
+            raise RuntimeError("会话记录里没有工作目录")
+        await asyncio.to_thread(check_paid, me, sid, account)
+        if block := await asyncio.to_thread(limit_block, c["path"], c["owner"], account, model,
+                                            len(summaries.PROMPT.encode())):
+            raise RuntimeError(block)
+        fork = str(uuid.uuid4())
+        extra["fork"] = fork
+        await asyncio.to_thread(summary_claim, fork, me, sid)
+        d = (SummaryDriver or summary_driver_class())(fork, cwd, False, account, mode=mode, model=model, effort=effort)
+        # 建好以后、事件循环还没跑到它的任务之前换成分叉：从主会话读历史，系统提示词照主会话的拼（CLI 续接时其实沿用记录里第一次的）
+        d.options = replace(d.options, resume=sid, fork_session=True, session_id=fork,
+                            system_prompt={"type": "preset", "preset": "claude_code",
+                                           "append": chat.session_prompt(sid, False)})
+        d.send(summaries.PROMPT)
+        try:
+            await asyncio.wait_for(asyncio.shield(d.task), summaries.TIMEOUT)
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"超过 {summaries.TIMEOUT} 秒没写完") from None
+        result = getattr(d, "task_result", None)
+        if d.blocked or d.error:
+            raise RuntimeError(d.blocked or d.error)
+        if not result:
+            raise RuntimeError("没有拿到结果")
+        usage = result.get("usage")
+        if result.get("is_error"):
+            raise RuntimeError(f"回复出错（{result.get('stop_reason')}）")
+        text = result.get("result") or ""
+        try:
+            summary = summaries.parse(text)
+        except ValueError as e:   # 回复开头一起记下：10-29 第一次没写成时只记了「没有长摘要」，查不出是什么回复
+            raise RuntimeError(f"{e}（回复开头：{text[:200] or '空的'}）") from None
+    except Exception as e:
+        why = str(getattr(e, "detail", e))
+    finally:
+        if d:
+            if not d.task.done():
+                d.task.cancel()
+            await asyncio.gather(d.task, return_exceptions=True)
+            try:   # 和网页、工作流一样按真实会话记录记调用是哪个号发的，账照常算
+                if path := await asyncio.to_thread(calls.find, fork):
+                    await asyncio.to_thread(api_calls.record, path, d.account, "web")
+            except Exception as e:
+                why = why or f"调用归属收尾失败：{e}"
+        hit = summaries.done(sid, c["family"], summary, why, usage, extra)
+        named = naming.propose(sid, summary["name"]) if summary else ""
+        rate = f"，缓存命中 {hit:.0%}" if hit is not None else ""
+        if summary:
+            print(f"会话 {sid} 写好了摘要（{c['account']}，上下文 {c['ctx'] // 1000}K{rate}）"
+                  + (f"，名字没起：{named}" if named else ""), flush=True)
+        else:
+            print(f"会话 {sid} 的摘要没写成（{c['account']}{rate}）：{why}", flush=True)
+        if summaries.stopped(c["family"]):
+            print(f"{c['family']} 这一家的号连着 {summaries.BAD_LIMIT} 次没命中缓存，会话摘要在这家的号上先停做，重启后重新开始", flush=True)
+        summary_running.discard(sid)
+
+
+async def summary_loop():
+    while True:
+        await asyncio.sleep(SUMMARY_GAP)
+        try:
+            found = await asyncio.to_thread(summary_candidates, time.time())
+        except Exception as e:
+            print(f"会话摘要清点出错：{type(e).__name__}: {e}\n{traceback.format_exc()}", flush=True)
+            continue
+        for c in found:
+            if len(summary_running) >= summaries.AT_ONCE:
+                break
+            summaries.begin(c["sid"], c["ctx"], c["calls"], c["end"])
+            summary_running.add(c["sid"])
+            t = asyncio.create_task(summary_run(c))
+            summary_tasks.add(t)
+            t.add_done_callback(summary_tasks.discard)
+
+
+@app.get("/api/tabs/{tid}/summary")
+def session_summary(tid: str, me: Who = Depends(who)):
+    """会话信息里显示的摘要（短的在前，点开看长的）；还没有是 null。前端把 404 当成旧后端没有这个接口，所以别的情况不回 404。"""
+    if tid not in tid_sid:
+        raise HTTPException(409, "服务器已重启，尚未载入该会话：请重新打开该会话后重试")
+    check_see(me, tid_sid[tid])
+    s = summaries.get(tid_sid[tid])
+    return {"summary": {k: s.get(k) for k in ("short", "long", "at")} if s else None}
 
 
 class TagsBody(BaseModel):
@@ -2229,7 +2510,7 @@ def after_turn(d: Driver):
     save_seen()   # 写不进去由写盘线程在服务输出里说；记不下来只是重启后侧边栏少一颗未读点
     path = (tab.session.path if tab else None) or calls.find(d.session_id)
     if path:
-        asyncio.create_task(asyncio.to_thread(api_calls.record, path, d.account, "web"))
+        asyncio.create_task(asyncio.to_thread(api_calls.record, path, d.account, api_calls.web_source(d.account)))
     asyncio.create_task(auto_probe(d.account))
 
 
@@ -2237,7 +2518,7 @@ def note_mid(d: Driver, mid: str):
     """网页对话的 CLI 一发出请求，就记下这次调用是驱动的号发的（见 api_calls.note）。"""
     async def run():
         try:
-            await asyncio.to_thread(api_calls.note, mid, d.account, "web", d.session_id)
+            await asyncio.to_thread(api_calls.note, mid, d.account, api_calls.web_source(d.account), d.session_id)
         except Exception as e:
             print(f"记回复编号 {mid} 是 {d.account} 发的失败：{e}", flush=True)
     asyncio.create_task(run())
@@ -2315,6 +2596,8 @@ def can_pay(payer: str | None, account: str) -> bool:
     """用绿的要付钱：限量号在多用户实例里要余额还没透支到 OVERDRAFT（和 users.paid_why 同一条线）。
     号主用自己的号不看余额：花的钱又流回他自己。"""
     account = base_account(account)
+    if account in REMOTE and REMOTE[account].get('billing') == 'upstream':
+        return payer is not None and payer == REMOTE[account].get('user')
     if account not in PAID or not users.MULTI or owns(payer, account):
         return True
     return payer is not None and users.cached_balance(payer) > users.OVERDRAFT
@@ -3239,6 +3522,8 @@ class Birth:
         self.driver: Driver | None = None
         self.error, self.last, self.born = "", None, None   # 没建成的原因、那时停在哪一步；建成后的正式标签页快照
         self.switched: dict | None = None   # 第一句话被预测拦截拦下、自动切了号（同 Tab.switched）
+        self.todos_born = False   # 已经在待办上记了从它开出（body.todos），没建成要撤掉
+        self.todo_groups: list[str] = []   # 那几条待办的分组名：写出记录时当标签打上
         self.done_at: float | None = None
         self.pushed = None
 
@@ -3293,6 +3578,12 @@ class Birth:
                 await asyncio.to_thread(personas.remember, self.sid, self.card, personas.folder(self.sid))
             except OSError as e:
                 return self.fail(f"人设卡「{self.card['name']}」的资料、钩子写不进 {personas.folder(self.sid)}：{e}")
+            if body.todos:   # 拉起 CLI 之前记上：会话一开口就能用 cctodo mine 读到这几条；没建成在 finally 里撤掉
+                try:
+                    self.todo_groups = await asyncio.to_thread(todos.born, me.name, body.todos, self.sid)
+                    self.todos_born = True
+                except todos.Bad as e:
+                    return self.fail(f"没能记下这个会话是从哪几条待办开出的：{e}")
             env = isolation.for_sid(self.sid)
             d = self.driver = new_driver(self.sid, str(self.cwd), resume=False, account=self.account,
                                          mode=run_mode(self.account, self.mode), model=launch_model(self.account, env, self.model),
@@ -3312,12 +3603,17 @@ class Birth:
             self.fail(f"{type(e).__name__}: {e}")
         finally:
             self.done_at = time.monotonic()
+            if self.error and self.todos_born:   # 会话没建成，待办上记的开出、认领都不成立
+                try:
+                    await asyncio.to_thread(todos.unborn, me.name, self.sid)
+                except todos.Bad as e:
+                    print(f"新建会话 {self.sid} 没建成，待办上的开出记录撤不掉：{e}", flush=True)
 
     async def found(self, path: Path):
         body, d = self.body, self.driver
         tab = open_tab(path)
         remember_account(tab, self.account)
-        remember_tags(tab.id, body.tags)
+        remember_tags(tab.id, body.tags + self.todo_groups)   # 从待办页开出的，连同那几条的分组名（todos.born）
         tab.model = body.model
         # 选的权限模式一建好就存下来（和换模式一样），释放、重启后照原样恢复。
         # 会话已经建出来了，存不下来不能当成建失败（前端会再建一个），写进这个标签页的出错原因里
@@ -3373,6 +3669,10 @@ async def new_session(body: NewSession, me: Who = Depends(who)):
         raise HTTPException(400, f"不支持该权限模式：{mode}")
     if body.effort is not None and body.effort not in EFFORTS:
         raise HTTPException(400, f"不支持该思考强度：{body.effort}")
+    if body.todos:   # 从待办页发来的：先核对这几条都在、没做完（游客没有待办）
+        if not me.name:
+            raise HTTPException(400, "待办只给登录的用户用")
+        body.todos = await asyncio.to_thread(todo_call, todos.check, me.name, body.todos)   # 第一次要读文件，不在事件循环里等
     # 没指定就按这个人的设置（没设就是全局设置）。挑号和下面的 check_paid 都要算余额，放在线程里（见 prepare_speak）
     account = body.account or (await asyncio.to_thread(default_account, me, None, body.environment))[0]
     check_web_account(account)
@@ -3381,7 +3681,8 @@ async def new_session(body: NewSession, me: Who = Depends(who)):
     private_call(isolation.check_account, env, account)
     await asyncio.to_thread(check_paid, me, None, account)
     model = run_model(account, body.model)   # 选的模型和号不是一家的，这个号上按它自己的默认模型（见 run_model）
-    if why := rates.unpriced(model):   # 没有单价的模型不许用（rates.unpriced）
+    # 没有单价的模型不许用（rates.unpriced）；中转站的模型按号的单价查（Gemini 只在号的配置里有价，单价表里没有）
+    if why := rates.unpriced(rates.billing_model(model, account)):
         raise HTTPException(400, why)
     card = persona_call(personas.pick, me.name, body.persona, body.personaConsent)
     work = None
@@ -3621,6 +3922,66 @@ async def spend_map(tid: str, me: Who = Depends(who)):
     return with_seq(tree, tab.session.seq_of)
 
 
+# ---------- 审稿看板（2026-10-29 起，见 review_board.py）：自动审稿的会话点开的整页面板，只读 ----------
+
+def review_ws(tab: Tab, ws: str) -> str | None:
+    """看哪个工作区：只认这个会话的 review.py 打印过的（reviewWs），不给就是最近那个；一个都没有是 None"""
+    known = tab.session.info.get("reviewWs") or []
+    if not ws:
+        return known[-1] if known else None
+    if ws not in known:
+        raise HTTPException(400, f"这个会话没有审过这个工作区：{ws}")
+    return ws
+
+
+def recent_said(tab: Tab, n: int = 8) -> list[dict]:
+    """会话里 AI 最近说的几段话（不算思考、子代理、重复的行），看板上「AI 最近说的话」"""
+    out = []
+    for it in reversed(tab.session.items):
+        if it.get("kind") == "text" and not (it.get("thought") or it.get("sidechain") or it.get("dup")) and (it.get("text") or "").strip():
+            out.append({"ts": it.get("ts"), "text": it["text"][:4000]})
+            if len(out) >= n:
+                break
+    return out[::-1]
+
+
+@app.get("/api/tabs/{tid}/review")
+async def review_board_get(tid: str, ws: str = "", me: Who = Depends(who)):
+    tab = seen_tab(tid, me)
+    path = review_ws(tab, ws)
+    out = {"known": tab.session.info.get("reviewWs") or [], "said": recent_said(tab), "board": None}
+    if path:
+        try:
+            out["board"] = await asyncio.to_thread(review_board.board, path, getattr(tab.session.path, "run_as", None))
+        except OSError as e:
+            raise HTTPException(500, f"读不到审稿工作区 {path}：{e}")
+    return out
+
+
+@app.get("/api/tabs/{tid}/review/diff")
+async def review_board_diff(tid: str, v: str, ws: str = "", me: Who = Depends(who)):
+    """某一版和上一版差在哪（看板上点开某一版时取）"""
+    tab = seen_tab(tid, me)
+    if not (path := review_ws(tab, ws)):
+        raise HTTPException(400, "这个会话还没有送审过")
+    try:
+        return await asyncio.to_thread(review_board.version_diff, path, v, getattr(tab.session.path, "run_as", None))
+    except OSError as e:
+        raise HTTPException(500, f"读不到这一版：{e}")
+
+
+@app.get("/api/tabs/{tid}/review/notes")
+async def review_board_notes(tid: str, ws: str = "", me: Who = Depends(who)):
+    """小铃铛.md 全文（看板上平时只给末尾，点「看全部」时取）"""
+    tab = seen_tab(tid, me)
+    if not (path := review_ws(tab, ws)):
+        raise HTTPException(400, "这个会话还没有送审过")
+    try:
+        return {"text": await asyncio.to_thread(review_board.notes_full, path, getattr(tab.session.path, "run_as", None))}
+    except OSError as e:
+        raise HTTPException(500, f"读不到 小铃铛.md：{e}")
+
+
 @app.post("/api/tabs/{tid}/model", dependencies=[Depends(full_only)])
 async def set_model(tid: str, body: ModelBody, me: Who = Depends(who)):
     """换网页对话用的模型；Claude 正连着就当场切换，否则下次发话时生效。"""
@@ -3629,10 +3990,10 @@ async def set_model(tid: str, body: ModelBody, me: Who = Depends(who)):
         if body.model not in api_models(tab.account):
             raise HTTPException(400, f"{tab.account} 只接入了 {'、'.join(api_models(tab.account))}")
     elif body.model and model_family(body.model) != account_family(tab.account):
-        names = {"claude": "Claude", "gpt": "GPT", "deepseek": "DeepSeek", "glm": "智谱"}
+        names = {"claude": "Claude", "gpt": "GPT", "deepseek": "DeepSeek", "glm": "智谱", "gemini": "Gemini"}
         kind, other = names.get(account_family(tab.account), account_family(tab.account)), names[model_family(body.model)]
         raise HTTPException(400, f"{tab.account} 是 {kind} 账号，不支持 {body.model}；如需使用，请先切换到 {other} 账号")
-    if why := rates.unpriced(body.model):   # 没有单价的模型不许用（rates.unpriced）
+    if why := rates.unpriced(rates.billing_model(body.model, tab.account)):   # 没有单价的模型不许用；中转站按号的单价查
         raise HTTPException(400, why)
     await asyncio.to_thread(check_paid, me, tab.sid, tab.account)   # 要把 CLI 连起来才能换；要算余额，不在事件循环里算
     d = await tab.live_driver()
@@ -4099,10 +4460,16 @@ def blocked_empty(path: Path, mtime: float, size: int) -> bool:
 
 
 def spend_fields(path: Path, since: float | None = None, snap: calls.Snapshot | None = None) -> dict:
-    """会话标题前的总消耗：spent 全部、spentPaid 其中进账本的、spentBlue 进账本的里面由预定付掉的（见 users.spending），
+    """会话标题前的总消耗：spent 全部、spentPaid 用户付的金额（含远端已结算的展示），spentBlue 由预定付掉的（见 users.spending），
     前端换算成点数，免费号的、照常扣钱的、预定付掉的各用各的颜色写。since、snap 见 users.spending。"""
     sp = users._sum_rows(users.api_rows(path.stem, since)) if str(path).startswith("api-session/") else users.spending(path, since, snap)
-    return {"spent": sp["all"], "spentPaid": sp["paid"], "spentBlue": sp["blue"]}
+    # 从这个会话派出去的工作流任务（ccagent、ccrun、包装 SDK）也算进来：子代理是它的工具，花的钱该显示在它头上（2026-10-29 主人说的）。
+    # 只加在展示上，账本照旧按各自的会话记一次；任务会话本身不出现在会话列表里，不会被算两遍
+    if not str(path).startswith("api-session/") and Path(path).parent.name != "subagents":
+        for kid in workflows.runs_of(Path(path).stem):
+            if p := calls.find_in(snap, kid):
+                sp = users.add_spending(sp, users.spending(p, since, snap))
+    return {"spent": sp["all"], "spentPaid": users.display_paid(sp), "spentBlue": sp["blue"]}
 
 
 def card_of(path: Path, mtime: float, size: int, snap: calls.Snapshot | None = None):
@@ -4179,7 +4546,7 @@ def overview(mins: float | None = None, mine: int = 0, me: Who = Depends(who)):
         cwd = read_cwd(newest, sessions[0]["mtime"])
         # test：这一组是测试工作区里的会话（一个目录就是一个工作目录，按组标就够了），前端默认藏起来
         groups.append({"name": cwd or d.name, "sessions": sessions, "test": is_test_cwd(cwd)})
-    external = api_gateway._ACTIVE.conversations.cards(only or (None if me.admin else me.name)) if me.name else []
+    external = api_gateway.listed_cards(only or (None if me.admin else me.name)) if me.name else []
     for c in external:
         c.update(spend_fields(Path(c["path"])))
         if since is not None:
@@ -4232,7 +4599,7 @@ def side_rows(me: Who, tests: int, snap: calls.Snapshot) -> list[tuple]:
         rows += [(-m, str(p), m, s, p, cwd or d.name, test) for m, s, p in mine]
     if me.name:
         rows += [(-c["mtime"], c["path"], c["mtime"], 0, Path(c["path"]), "API 会话", False)
-                 for c in api_gateway._ACTIVE.conversations.cards(me.name)]
+                 for c in api_gateway.listed_cards(me.name)]
     rows.sort(key=lambda r: (r[0], r[1]))
     return rows
 
@@ -4416,8 +4783,9 @@ def get_me(me: Who = Depends(who)):
     # devices：这个实例有没有「设备」页（开了 ssh 门卫、对话模式），登录了才给入口。personas：「人设卡」页，对话模式就有（游客也能看、能选公开的）
     # bottomTabs：留不留底部标签页栏（账号级的偏好，同 /api/settings 那一项）。
     # 跟着身份给，是因为页面恢复标签页之前就要知道（没开时只恢复正在看的那一个，见 js/tabs.js 的 load），设置是另一个请求、不等它
+    # todos：侧边栏的「待办」入口（todos.py），对话模式、登录了才有（待办按网页账号存，游客没有）
     return {**users.me_info(me), "devices": devices.ENABLED and not config.readonly and bool(me.name),
-            "personas": not config.readonly,
+            "personas": not config.readonly, "todos": not config.readonly and bool(me.name),
             "bottomTabs": None if config.readonly else users.bottom_tabs(me)}
 
 
@@ -4519,6 +4887,111 @@ def persona_delete(cid: str, me: Who = Depends(who)):
     return {"name": persona_call(personas.delete, me.name, cid)}
 
 
+# ---------- 待办（2026-10-29 起，下午改成清单入口，见 todos.py）：侧边栏「待办」页列出登记的清单文件、快速新建、改几样（攒成操作，AI 下次读清单时写进文件）、勾选几条发到新会话 ----------
+
+def todo_call(fn, *args, **kw):
+    try:
+        return fn(*args, **kw)
+    except todos.Bad as e:
+        raise HTTPException(400, str(e))
+
+
+def todo_tag(user: str, sid: str, group: str):
+    """分组名当会话标签（todos.on_take）：认领了有分组的待办、待办换了分组时，给正在做它的会话加上这个标签，原有的不动。
+    找不到会话记录、标签已经满了就记一行日志：待办照样认领、改好，标签是顺带的"""
+    p = calls.find(sid)
+    if not p:
+        print(f"待办分组「{group}」没能打到会话 {sid} 上：找不到它的会话记录", flush=True)
+        return
+    tid = tab_id(p)
+    have = tags.get(tid, [])
+    if group in have:
+        return
+    if len(have) >= 20:   # clean_tags 最多留 20 个
+        print(f"待办分组「{group}」没能打到会话 {sid} 上：它已经有 20 个标签", flush=True)
+        return
+    tid_sid[tid] = sid
+    remember_tags(tid, have + [group])
+
+
+todos.on_take = todo_tag
+
+
+def todo_me(me: Who) -> str:
+    if not me.name:
+        raise HTTPException(403, "待办只给登录的用户用")
+    return me.name
+
+
+class TodoBody(BaseModel):
+    """新建、修改：给了的字段才动（exclude_unset），null 是清掉。重要性、时限、耗时是 {v, src}，网页上点的 src 是 user"""
+    title: str | None = None
+    group: str | None = None
+    parent: str | None = None
+    level: int | None = None
+    status: str | None = None
+    importance: dict | None = None
+    deadline: dict | None = None
+    effort: dict | None = None
+    summary: str | None = None
+    body: str | None = None
+    dir: str | None = None
+
+
+def todo_view(me: Who) -> dict:
+    """待办页要的全部：分组、每条待办（日志换成算好的会话链接，不整本给）、挂着的会话各自的卡片和此刻的状态点。
+    会话卡片和侧边栏「最近」同一种（card_of）；找不到、看不到的写 missing，被删了的写 deleted。
+    正在做它的会话被删了就放手（记进日志），页面上不再挂在「正在做」底下。
+    共用的待办（todos_shared）里另一个实例上的会话这边找不到，写 elsewhere（那个实例的端口），页面上照实写在哪"""
+    user = todo_me(me)
+    book = todo_call(todos.overview, user)
+    marks = {x["sid"]: x.get("at", "") for it in book["items"].values() for v in todos.links(it).values() for x in v}
+    cards = {sid: {"sid": sid, "missing": True, "elsewhere": at} for sid, at in marks.items() if at and at != todos.HERE}
+    sids = set(marks) - set(cards)
+    snap = calls.snapshot(project_roots(me)) if sids else None
+    states = side_states(me) if sids else {}
+    gone = []
+    for sid in sids:
+        p = calls.find_in(snap, sid)
+        if not p or not users.can_see(me, sid):
+            cards[sid] = {"sid": sid, "missing": True}
+            continue
+        try:
+            mtime, size = mtime_size(p, snap)
+        except OSError:
+            cards[sid] = {"sid": sid, "missing": True}
+            continue
+        deleted = users.is_deleted(sid)
+        cards[sid] = {**card_of(p, mtime, size, snap), "sid": sid, "state": states.get(sid), "deleted": deleted}
+        if deleted:
+            gone.append(sid)
+    for sid in gone:
+        if any(w["sid"] == sid for it in book["items"].values() for w in it["working"]):
+            todo_call(todos.drop_session, user, sid, "会话已删除")
+            book = todo_call(todos.overview, user)
+    items = [{**{k: v for k, v in it.items() if k != "log"}, "links": todos.links(it)} for it in book["items"].values()]
+    # lists：登记的几份清单（在哪、哪份默认、读不出来或格式不对的原因）；pending：网页上攒着、还没写进文件的操作有几条（2026-10-29 改版，todos.py 开头）
+    return {"groups": book["groups"], "items": items, "sessions": cards, "lists": book.get("lists", []), "pending": book.get("pending", 0),
+            "max": {"title": todos.MAX_TITLE, "group": todos.MAX_GROUP, "summary": todos.MAX_SUMMARY}}
+
+
+@app.get("/api/todos")
+def todo_list(me: Who = Depends(who)):
+    return todo_view(me)
+
+
+@app.post("/api/todos", dependencies=[Depends(full_only)])
+def todo_new(body: TodoBody, me: Who = Depends(who)):
+    it = todo_call(todos.add, todo_me(me), body.model_dump(exclude_unset=True))
+    return {**{k: v for k, v in it.items() if k != "log"}, "links": todos.links(it)}
+
+
+@app.put("/api/todos/{tid}", dependencies=[Depends(full_only)])
+def todo_edit(tid: str, body: TodoBody, me: Who = Depends(who)):
+    it, _ = todo_call(todos.edit, todo_me(me), tid, body.model_dump(exclude_unset=True))
+    return {**{k: v for k, v in it.items() if k != "log"}, "links": todos.links(it)}
+
+
 @app.post("/api/register")
 def register(body: Cred, response: Response):
     """注册完直接登录。只用独立环境的人（users.is_new，刚注册的名下还没有会话，都是）顺手建好独立环境：他们的界面上只有这一种环境。
@@ -4599,6 +5072,35 @@ def my_ledger(me: Who = Depends(who)):
     if not me.name:
         raise HTTPException(401, "游客没有账本，请登录后查看")
     return with_titles(users.ledger(me.name))
+
+
+# ---------- 账号页的几张图（stats.py，2026-10-29 主人加的；前端 js/stats.js）----------
+
+@app.get("/api/balance-history")
+def balance_history(days: float = 30, me: Who = Depends(who)):
+    """余额最近 days 天的曲线，每小时一个点，最后一点就是此刻的余额（和账本同一个数）"""
+    if not me.name:
+        raise HTTPException(401, "游客没有账本，请登录后查看")
+    return stats.balance_series(me.name, max(1.0, min(days, 31)))
+
+
+@app.get("/api/owned")
+def owned_accounts(me: Who = Depends(who)):
+    """自己是号主的号：起算以后自己和别人各在上面花了多少、几个人用过（号的额度、到期时间前端从额度接口拿）"""
+    if not me.name:
+        raise HTTPException(401, "请登录后查看")
+    return {"accounts": stats.owned(me.name)}
+
+
+@app.get("/api/usage-stats")
+def usage_stats(days: float = 3, user: str | None = None, me: Who = Depends(who)):
+    """用量统计页：user 不给是自己，all 是所有人，查看器账号还能写某个人。花得最多的几个会话配上名字（看得到的才配）"""
+    out = stats.usage(me, days, user)
+    top = out["sessions"].get("top") or []
+    names = session_titles(s["sid"] for s in top if not s["sid"].startswith("api-"))
+    for s in top:
+        s["title"] = "API 调用" if s["sid"].startswith("api-") else (names.get(s["sid"]) or {}).get("title") or ""
+    return out
 
 
 @app.get("/api/board")
@@ -4990,6 +5492,7 @@ def main():
     args = ap.parse_args()
     config.gate_port = args.gate_port or args.port + 1000
     config.port = args.port   # 人设卡接口的套接字没配地址时按端口起名（personas.start）
+    todos.HERE = str(args.port)   # 共用的待办里记下会话是哪个实例上的（todos.py 开头）
     roots = [hostfs.Path(r).expanduser() for r in ([args.root] if args.root else ROOT_CANDIDATES)]
     config.interval = args.interval
     config.readonly = args.mode == "readonly"

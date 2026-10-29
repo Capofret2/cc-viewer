@@ -540,7 +540,8 @@ def of_session(sid: str) -> dict | None:
 
 
 def used_by(user: str, sids) -> bool:
-    """这个人用过人设卡没有：自己建过卡（删了的也算）、设过默认，或者名下有会话选了卡。设置里「二次元」（新会话页的颜文字和人设卡）没切过时开不开按它（users.features 的 persona）。"""
+    """这个人用过人设卡没有：自己建过卡（删了的也算）、设过默认，或者名下有会话选了卡。设置里「二次元」（新会话页的颜文字和人设卡）没切过时，
+    用过卡或者累计花掉超过 5 毛就开着（server.used_features，users.features 的 persona）。"""
     with _lock:
         return (user in _db["defaults"] or any(c.get("owner") == user for c in _db["cards"].values())
                 or any(sid in _snaps for sid in sids))
@@ -653,6 +654,33 @@ def handle(req: dict, user: str, sid: str) -> str:
         # 会话里的 ccname 给自己的会话起名（naming.py），借这个套接字认出是哪个会话
         import naming
         return naming.handle(req, sid)
+    if op == "todo":
+        # 会话里的 cctodo 读写会话主人的待办（todos.py），借这个套接字认出是哪个会话、主人是谁
+        import todos
+        try:
+            return todos.handle(req, user, sid)
+        except todos.Bad as e:
+            raise Bad(str(e)) from None
+    if op == "chan":
+        # 会话里的 ccchan 用频道（channels.py），借这个套接字认出是哪个会话、主人是谁
+        import channels
+        try:
+            return channels.handle(req, user, sid)
+        except channels.Bad as e:
+            raise Bad(str(e)) from None
+    if op == "recall":
+        # 会话里的 ccrecall 回忆（sessions.serve_request）：查看器以自己的身份只搜这个实例；
+        # 普通用户只搜主人是他的会话，instance.json 写了 recall_users 才开放，查看器账号不限
+        import chat
+        import instance
+        import sessions
+        admin = chat.owner_admin(sid)
+        if not admin and not instance.RECALL_USERS:
+            raise Bad("回忆功能还没有开放")
+        try:
+            return sessions.serve_request(req.get("argv") or [], None if admin else user)
+        except sessions.Refused as e:
+            raise Bad(str(e)) from None
     if op == "ls":
         ov = overview(user)
         mine = of_session(sid)

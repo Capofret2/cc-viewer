@@ -372,10 +372,10 @@ def set_auto_switch(who: Who, on: bool):
 
 def bottom_tabs(who: Who) -> bool | None:
     """也留着页面底下的标签页栏（开关）：开着时换会话不把旧的收掉，一个个标签页切。
-    默认关，在设置里打开才记成 True；游客和单用户实例是 None，不出这个开关。"""
+    默认开：在设置里关掉记成 False、打开记成 True，没有这一项的按开；游客和单用户实例是 None，不出这个开关。"""
     if not (MULTI and who.name):
         return None
-    return users.get(who.name, {}).get("bottomTabs") is True
+    return users.get(who.name, {}).get("bottomTabs") is not False
 
 
 def set_bottom_tabs(who: Who, on: bool):
@@ -384,10 +384,7 @@ def set_bottom_tabs(who: Who, on: bool):
     with _lock:
         if who.name not in users:
             raise HTTPException(404, f"用户 {who.name} 不存在")
-        if on:
-            users[who.name]["bottomTabs"] = True
-        else:
-            users[who.name].pop("bottomTabs", None)
+        users[who.name]["bottomTabs"] = bool(on)   # 两头都记下：默认值以后再变，已经选过的人不跟着变
         _save(USERS_FILE, users)
 
 
@@ -712,6 +709,8 @@ def paid_why(who: Who, sid: str | None = None, blue_on=None, account: str | None
     payer = who.name if sid is None else owner_of(sid)
     if payer is None:
         return "无主会话无法使用限量号（花费无人承担），请联系管理员为其指定主人"
+    if account and instance.remote_billed(account):
+        return "" if payer == instance.REMOTE[account].get('user') else "这个远端账号仅供指定用户使用"
     if account and instance.owns(payer, account):
         return ""
     if MULTI:
@@ -730,6 +729,9 @@ def paid_ok(who: Who, sid: str | None = None) -> bool:
 
 def paid_block(who: Who, sid: str | None, account: str, blue_on=None) -> str:
     """用这个号会不会被拦、为什么；空字符串就是不拦。blue_on 见 paid_why。"""
+    if instance.remote_billed(account):
+        payer = who.name if sid is None else owner_of(sid)
+        return '' if payer is not None and payer == instance.REMOTE[account].get('user') else '这个远端账号仅供指定用户使用'
     if account not in PAID:
         return ""
     why = paid_why(who, sid, blue_on, account)
@@ -882,7 +884,7 @@ def _split_rows_now(path: Path, snap: calls.Snapshot | None, identity: tuple, ke
 def _charge_rows(own):
     """网页和外部API共用计价、特惠、预定分摊规则，保留整批读取的性能优化。"""
     idx, rows = api_calls.INDEX, []
-    billed = [acc in PAID and _paid_then(acc, c["ts"]) for _, c, _, acc in own]
+    billed = [acc in PAID and _paid_then(acc, c["ts"]) and mid not in idx.remote for mid, c, _, acc in own]
     got = iter(reserve.shares([(mid, acc, t) for (mid, _, t, acc), b in zip(own, billed) if b]))
     for (mid, c, t, acc), b in zip(own, billed):
         paid = blue = None
@@ -908,7 +910,33 @@ def api_rows(sid, since=None):
 
 def _sum_rows(rows: list) -> dict:
     return {"all": calls.by_model([r[1] for r in rows]), "paid": calls.by_model([r[2] for r in rows if r[2] is not None]),
-            "blue": calls.by_model([r[3] for r in rows if r[3] is not None]), "unknown": sum(r[4] for r in rows)}
+            "blue": calls.by_model([r[3] for r in rows if r[3] is not None]), "unknown": sum(r[4] for r in rows),
+            "remote": calls.by_model([r[1] for r in rows if r[5] in api_calls.INDEX.remote])}
+
+
+def display_paid(sp):
+    """远端已扣的金额只合进会话展示，不能写回本地账本的 paid。"""
+    paid = {model: dict(use) for model, use in sp['paid'].items()}
+    for model, use in sp.get('remote', {}).items():
+        total = paid.setdefault(model, {})
+        for key, value in use.items():
+            total[key] = total.get(key, 0) + value
+    return paid
+
+
+def add_spending(a: dict, b: dict) -> dict:
+    """两份 spending 的结果加在一起：会话卡片和底部的花费把从它派出去的工作流任务也算进来（server.spend_fields）。
+    只用于展示，账本照旧按各自的会话记一次"""
+    out = {}
+    for k in ("all", "paid", "blue", "remote"):
+        m = {model: dict(use) for model, use in a.get(k, {}).items()}
+        for model, use in b.get(k, {}).items():
+            tot = m.setdefault(model, {})
+            for kk, v in use.items():
+                tot[kk] = tot.get(kk, 0) + v
+        out[k] = m
+    out["unknown"] = a.get("unknown", 0) + b.get("unknown", 0)
+    return out
 
 
 def _split(path: Path | str, since: float | None = None, snap: calls.Snapshot | None = None) -> tuple[list, list, list, int]:
@@ -1310,18 +1338,33 @@ def _ledger_now(name: str, snap: calls.Snapshot | None) -> dict:
             "lost": lost, "grants": mine[::-1], "sessions": sessions}
 
 
-_bal: dict[str, tuple[float, float]] = {}   # 人 → (算的时刻, 余额)
+_bal: dict[str, tuple[float, dict]] = {}   # 人 → (算的时刻, {余额 balance, 累计花掉 spent})
+
+
+def _brief(led: dict) -> dict:
+    """整本账里 cached_balance、cached_spent 要的两个数。花掉和账本页一样，算上下预定付的"""
+    return {"balance": led["balance"], "spent": led["spent"] + led["reserved"]}
+
+
+def _cached(name: str) -> dict:
+    hit = _bal.get(name)
+    if hit and time.time() - hit[0] < 10:
+        return hit[1]
+    b = _brief(ledger(name))
+    _bal[name] = (time.time(), b)
+    return b
 
 
 def cached_balance(name: str) -> float:
     """余额，10 秒内沿用上次算的：能不能用限量号（打开页面时的设置接口、预测拦截的每个工具结果）都要问，账本整份重算太贵。
     发额度、下单付钱以后由 forget_balance 立刻清掉，不等 10 秒。"""
-    hit = _bal.get(name)
-    if hit and time.time() - hit[0] < 10:
-        return hit[1]
-    b = ledger(name)["balance"]
-    _bal[name] = (time.time(), b)
-    return b
+    return _cached(name)["balance"]
+
+
+def cached_spent(name: str) -> float:
+    """累计花掉多少（点，进账本的花费加下预定付的），和 cached_balance 同一份、同样 10 秒内沿用：
+    设置里二次元没切过的人按它定开不开（server.used_features），打开页面时设置接口要问。"""
+    return _cached(name)["spent"]
 
 
 def forget_balance(name: str | None):
@@ -1347,7 +1390,7 @@ def me_info(who: Who) -> dict:
                                   if e["account"] in values}}
     if who.name:
         led = ledger(who.name)
-        _bal[who.name] = (time.time(), led["balance"])   # 刚算的整本账，顺手给 cached_balance 用
+        _bal[who.name] = (time.time(), _brief(led))   # 刚算的整本账，顺手给 cached_balance、cached_spent 用
         # owns：他是号主的号，账号表上挂「我的」，这些号用起来不按余额拦（paid_why）
         # avatar：头像的版本，没传过是空字符串（见 set_avatar）；旧后端不给，前端就没有换头像这一项
         # plans：还在发的额度计划，账号页上画进度条（plans_of 的 current）；旧后端不给，前端就不画

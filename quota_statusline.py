@@ -94,7 +94,9 @@ def main():
     if data.get("transcript_path"):
         try:
             import api_calls
-            api_calls.record(data["transcript_path"], name, "terminal", wait=1)
+            # 用这一个 CLI 的启动标记，不按刚装好的配置把仍在直连的旧进程误记成远端。
+            source = api_calls.web_source(name) if os.environ.get('CC_VIEWER_REMOTE') == '1' else 'terminal'
+            api_calls.record(data["transcript_path"], name, source, wait=1)
         except Exception:
             pass
     if "--quiet" not in sys.argv:

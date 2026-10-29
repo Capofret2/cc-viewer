@@ -71,6 +71,13 @@ const shutPrefix = k => { prefixOpen.delete(k); prefixShut.add(k); };
 const prefixOf = new Map(), tailOf = new Map(), cardShut = new Map(), cardReport = new Map();
 // 调没调工具：请求气泡看它包着的全部条目（藏起来的工具也算），别的看画出来的那几段
 const usesTool = r => (r.all || r.parts || []).some(p => p.kind === 'tool');
+// 工作过程里特别长的正文是在跟用户说话：像汇报一样露在过程外面，把这一轮从它后面断开、前后各收各的过程。
+// 阈值看了多用户实例 30 天的数据：只数正文块时过程正文 95% 不到 170 字、98% 不到 275 字，
+// 300 字以上的抽出来看都是在讲原因、讲方案、认错；带字的思考块（session.py 标了 thought：过渡话、英文的内心独白）不算字数。
+// 旧后端不标 thought，就连它一起数
+const TALK_CHARS = 300;
+const talkLen = r => (r.kind === 'call' ? r.all || [] : [r])
+  .reduce((n, p) => n + (p.kind === 'text' && !p.thought ? (p.text || '').trim().length : 0), 0);
 // 一个请求气泡里画出来的工具调用
 const toolsOf = r => (r.parts || []).filter(p => p.kind === 'tool');
 // 正在回复的那一轮，标题栏上的用时每秒往上走：只有还在回复的标题栏读它，别的不跟着重画
@@ -191,13 +198,29 @@ export function foldPrefixes(rows, running, cuts = []) {
   if (live) for (const i of live) seenLive.add(foldKey(rows[i]));   // 也不按长短自动收成四行，写完以后照旧展开着
   if (run.length) runs.push(run);
   const plan = new Map(), before = new Map(), after = new Map();
-  // 一个规矩：每一轮都收进工作过程块，不分长短，块外面最多只留最后一个不调工具的汇报，
-  // 不再有散落的气泡；正在回复时块展开（里面每一步收成一行，见 isStep），这一轮停下来就整块收起，用户点过的照点的来
+  // 过程里够长的正文（TALK_CHARS）把一轮断成几段：每段到这样一个气泡为止，它当这一段的汇报（调没调工具都算）
+  const segs = [];
   for (const idx of runs) {
-    const isLive = idx === live;
-    if (idx.length < 2 && !usesTool(rows[idx[0]])) continue;   // 只有一个汇报：没有过程
-    // 最后一个气泡没调工具才算汇报；调了工具（说完话还在干活、被打断、正在跑）就整段都是过程，没有汇报
-    const lastAt = idx[idx.length - 1], last = rows[lastAt], report = !usesTool(last);
+    let from = 0;
+    for (let k = 0; k < idx.length - 1; k++) {
+      if (talkLen(rows[idx[k]]) >= TALK_CHARS) { segs.push({ idx: idx.slice(from, k + 1), talk: true, run: idx }); from = k + 1; }
+    }
+    segs.push({ idx: idx.slice(from), talk: false, run: idx });
+  }
+  // 一个规矩：每一轮都收进工作过程块，不分长短，块外面最多只留最后一个不调工具的汇报，
+  // 不再有散落的气泡；正在回复时块展开（里面每一步收成一行，见 isStep），这一轮停下来就整块收起，用户点过的照点的来。
+  // 断开的几段各是一块；正在回复的那一轮里几段都展开着（open），用时只在最后一段上往上走（isLive）
+  for (const { idx, talk, run: whole } of segs) {
+    const open = whole === live, isLive = open && !talk;
+    if (idx.length < 2 && (talk || !usesTool(rows[idx[0]]))) {   // 只有一个汇报（或一段长话）：没有过程
+      const k = foldKey(rows[idx[0]]);
+      prefixOf.delete(k);
+      tailOf.delete(k);
+      continue;
+    }
+    // 最后一个气泡没调工具才算汇报；调了工具（说完话还在干活、被打断、正在跑）就整段都是过程，没有汇报。
+    // 断开那一段的长话调了工具也算汇报
+    const lastAt = idx[idx.length - 1], last = rows[lastAt], report = talk || !usesTool(last);
     const pre = (report ? idx.slice(0, -1) : idx).map(i => rows[i]), key = 'p:' + foldKey(pre[0]);
     for (const it of pre) { const k = foldKey(it); prefixOf.set(k, key); tailOf.delete(k); }
     if (report) {
@@ -205,7 +228,7 @@ export function foldPrefixes(rows, running, cuts = []) {
       tailOf.set(lk, key);
       prefixOf.delete(lk);
     }
-    const shut = prefixShut.has(key) || (!isLive && !prefixOpen.has(key));
+    const shut = prefixShut.has(key) || (!open && !prefixOpen.has(key));
     cardShut.set(key, shut);
     cardReport.set(key, report);
     const end = report ? lastAt : lastAt + 1;   // 过程到这一行为止（不含）

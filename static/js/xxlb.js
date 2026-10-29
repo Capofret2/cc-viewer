@@ -40,16 +40,17 @@ const broken = ref(true);
 // 在显卡上做（pixi 滤镜）：贴图不用重算，切主题当场换，贴图照旧和别的新会话页共用
 const RECOLOR_BASE = 213;   // 她原本发色的色相
 // 每个主题一套，在竖版 demo 里逐个调的：hue 转到哪个色相（度），sat 饱和度乘几（可以大于 1），lift 往白色提亮多少。
-// 深色模式用同一套。表里没有的主题（以后加的）按主题色 --me-strong 的色相，饱和度 0.75、提亮 0.45（通用值）
+// 所有主题的 sat、lift 都和蓝色那套一样，只换色相（不然蓝色以外的发色太白、太淡）。
+// 深色模式用同一套。表里没有的主题（以后加的）按主题色 --me-strong 的色相，sat、lift 也和蓝色一样
+const RECOLOR_FALLBACK = { sat: 1.05, lift: 0.4 };
 const RECOLOR = {
-  green: { hue: 144, sat: 0.5, lift: 0.45 },
-  blue: { hue: 213, sat: 1.05, lift: 0.4 },
-  purple: { hue: 259, sat: 0.55, lift: 0.5 },
-  teal: { hue: 176, sat: 0.4, lift: 0.35 },
-  pink: { hue: 331, sat: 0.65, lift: 0.65 },
-  amber: { hue: 17, sat: 1.3, lift: 0.25 },
+  green: { hue: 144, ...RECOLOR_FALLBACK },
+  blue: { hue: 213, ...RECOLOR_FALLBACK },
+  purple: { hue: 259, ...RECOLOR_FALLBACK },
+  teal: { hue: 176, ...RECOLOR_FALLBACK },
+  pink: { hue: 331, ...RECOLOR_FALLBACK },
+  amber: { hue: 17, ...RECOLOR_FALLBACK },
 };
-const RECOLOR_FALLBACK = { sat: 0.75, lift: 0.45 };
 const RECOLOR_FRAG = `
 varying vec2 vTextureCoord;
 uniform sampler2D uSampler;

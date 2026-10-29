@@ -37,6 +37,13 @@ function rateOf(model, account) {
   const k = rateKey(model, account);
   return k ? rates[k] : null;
 }
+// 长上下文分档（同服务器 rates.tiered，某个中转站的 GPT-6 Astra）：一次调用的完整输入（未命中 + 缓存写入 + 缓存命中）
+// 超过门槛 over，这一整笔都按长档（long_in 这样的键）的单价算；旧后端不给 over 就照旧
+const TIER_KEYS = ['in', 'cw', 'cr', 'out', 'cw1h'];
+function tiered(r, use) {
+  if (!r || r.over == null || !use || (use.in || 0) + (use.cw || 0) + (use.cr || 0) <= r.over) return r;
+  return { ...r, ...Object.fromEntries(TIER_KEYS.filter(k => r['long_' + k] != null).map(k => [k, r['long_' + k]])) };
+}
 
 // 价目表（账号卡片底栏的「价目表」，app.js 的 priceRows）：
 // 「一次请求」把真实 Opus 5.5 调用的平均构成套到各家单价上比较（约 8 万次调用，
@@ -55,10 +62,11 @@ function missingHourRate(use, model, account, r) {
 
 // 一次请求花了几点：use 是 {in, cw, cr, out}；这个模型没有单价就是 null
 export function callPoints(use, model, account, mid) {
-  const r = rateOf(model, account);
+  const r = tiered(rateOf(model, account), use);
   if (!use || !r) return null;
   if ('charge_yuan' in use && r.yuan) return use.charge_yuan * r.yuan;
   const actual = callPrices.get(mid);
+  if (actual?.remote && actual.account === account && actual.yuan != null) return actual.yuan * (100 / FEN);
   if (r.estimate_only && actual && actual.account === account && !actual.estimated && actual.yuan != null) return actual.yuan * (100 / FEN);
   if (missingHourRate(use, model, account, r)) return null;
   return (use.in * r.in + use.cw * r.cw + use.cr * r.cr + use.out * r.out
@@ -70,16 +78,17 @@ export function setCallPrices(prices) {
   let changed = false;
   for (const [mid, value] of Object.entries(prices || {})) {
     const old = callPrices.get(mid);
-    if (!old || old.account !== value.account || old.estimated !== value.estimated || old.yuan !== value.yuan) {
+    if (!old || old.account !== value.account || old.estimated !== value.estimated || old.yuan !== value.yuan || old.remote !== value.remote || old.error !== value.error) {
       callPrices.set(mid, value); changed = true;
     }
   }
   if (changed) pointsVer.value++;
 }
 export function callEstimated(use, model, account, mid) {
+  const value = callPrices.get(mid);
+  if (value?.remote && value.account === account) return value.estimated || value.yuan == null;
   if (!rateOf(model, account)?.estimate_only) return false;
   if (use && 'estimated_calls' in use) return use.estimated_calls > 0;
-  const value = callPrices.get(mid);
   return !value || value.account !== account || value.estimated || value.yuan == null;
 }
 const spentEstimated = spent => Object.values(spent || {}).some(use => use.estimated_calls > 0);
@@ -179,7 +188,7 @@ export function setCallCovered(covered) {
 export const coveredOf = mid => (mid && callCovered.get(mid)) || 0;
 
 // 特惠结算时记下的免了几成（回复编号 → 0～1，服务器 reserve.recorded_free 给的）：绿条不够时免得比折扣少，用完了就不免。
-// 没记的（会话主人没有预定、不用结算的，只能花绿条，绿条总是够）按折扣算；旧后端不给这张表，也是按折扣算
+// 没记的（会话所属用户没有预定、不用结算的，只能花绿条，绿条总是够）按折扣算；旧后端不给这张表，也是按折扣算
 const callFree = reactive(new Map());
 export function setCallFree(free) {
   let changed = false;
@@ -195,6 +204,8 @@ export const freeOf = (mid, ts) => (mid && callFree.has(mid) ? callFree.get(mid)
 // 这几项各是多少放进悬停（手机上点一下）立刻浮出的分项卡片（vSplit）。账本照旧由后端分三段算，这里只改怎么显示。
 // 一次调用：p0 是照单价的全价（点），返回 {pay 实扣, red 照常扣钱, blue 由预定付掉, free 免掉的, why 免掉的是什么}
 export function callCharge(p0, mid, ts) {
+  const remote = callPrices.get(mid);
+  if (remote?.remote) return { pay: p0, red: p0, blue: 0, free: 0, remote: p0, error: remote.error, why: '远端结算，本地不重复扣费' };
   if (!isPaid(mid, ts)) return { pay: 0, red: 0, blue: 0, free: p0, why: accountOf(mid) ? '免费号，不扣钱' : '没有账号记录，不扣钱' };
   const p = p0 * (1 - freeOf(mid, ts)), f = coveredOf(mid);
   return { pay: p, red: p * (1 - f), blue: p * f, free: p0 - p, why: '特惠或折扣免掉' };
@@ -202,10 +213,10 @@ export function callCharge(p0, mid, ts) {
 // 分项卡片里的字：一项一行，不到 0.05 分的不写；有免掉的就在最前面写全价，几项加起来对得上。
 // full 给 null 就不写全价（余额看板那种按花钱算的，下单付的预定不是调用的全价）；blueLabel 换掉「由预定付掉」的说法
 export function chargeSplit(c, fmt = fen, blueLabel = '由预定付掉') {
-  const rows = [['照常扣钱', c.red], [blueLabel, c.blue], [c.why, c.free]].filter(([, p]) => p * FEN >= 0.05);
+  const rows = [['照常扣钱', Math.max(0, c.red - (c.remote || 0))], ['远端费用，本地不重复扣费', c.remote || 0], [blueLabel, c.blue], [c.why, c.free]].filter(([, p]) => p * FEN >= 0.05);
   const full = c.full === undefined ? c.pay + c.free : c.full;
   if (full != null && c.free * FEN >= 0.05) rows.unshift(['按单价全价', full]);
-  return rows.map(([label, p]) => `${label} ${fmt(p)}`).join('\n');
+  return rows.map(([label, p]) => `${label} ${fmt(p)}`).concat(c.error ? [c.error] : []).join('\n');
 }
 
 // 分项卡片：v-split="字"，有鼠标的设备悬停立刻浮出，手机上点一下浮出、再点或点别处收起（点到的这下不再交给外面，
@@ -251,8 +262,16 @@ export function spentMoney(r) {
 // 这时写的是照常扣钱的 + 这段时间下单付的预定，预定付掉的那些调用不再算（钱下单时已经算过）
 // stack：最近会话、标签下拉、全部会话的卡片上，数固定在标题右上角（.pts-stack 是右浮动，写在标题文字前面，标题绕着它排）
 // bare：不写「元」、只留到分，只写数（简洁模式侧边栏的会话底下那行，接在几分钟前后面，省地方）
+// 底下那排的花费小标签：两位有效数字，一百元以上不留小数，数后面写 ¥（和对话里气泡头一样）
+export function chipYuan(points) {
+  const y = points * FEN / 100;
+  if (!(y >= 1e-6)) return '0¥';
+  return (y >= 99.5 ? String(Math.round(y)) : y.toPrecision(2)) + '¥';
+}
+
 export const SpentPts = {
-  props: { spent: Object, paid: Object, blue: Object, bought: { type: Number, default: null }, stack: Boolean, bare: Boolean },
+  // chip：底下那排的花费小标签用，写短的（chipYuan，估的也不加记号），不挂分项卡片（点它要开自己的卡片，分项卡片会抢走这一下）
+  props: { spent: Object, paid: Object, blue: Object, bought: { type: Number, default: null }, stack: Boolean, bare: Boolean, chip: Boolean },
   directives: { split: vSplit },
   computed: {
     t() {
@@ -263,11 +282,12 @@ export const SpentPts = {
       let text = fen(pay, this.bare ? 2 : 3);
       if (this.bare) text = text.replace(/元$/, '');
       if (spentEstimated(this.spent)) text += ' 预估';
-      const split = chargeSplit({ red: p - b, blue: money ? this.bought : b, free: Math.max(0, (all || 0) - p), why: '免费或折扣免掉',
+      const remote = Object.values(this.paid || {}).reduce((n, use) => n + (use.remote_yuan || 0), 0) * (100 / FEN);
+      const split = chargeSplit({ red: p - b, remote, blue: money ? this.bought : b, free: Math.max(0, (all || 0) - p), why: '免费或折扣免掉',
                                   full: money ? null : all || 0 }, fen, money ? '这段时间下单付的预定' : '由预定付掉');
-      return { text, split };
+      return { text, split, chip: chipYuan(pay) };
     },
   },
   template: `<span v-if="stack" v-show="t" class="pts-stack"><b v-if="t" class="pts" v-split="t.split">{{ t.text }}</b></span><b
-    v-else-if="t" class="pts" v-split="t.split">{{ t.text }}</b>`,
+    v-else-if="t && chip" class="pts">{{ t.chip }}</b><b v-else-if="t" class="pts" v-split="t.split">{{ t.text }}</b>`,
 };

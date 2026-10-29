@@ -1,6 +1,6 @@
 // 对话与会话设置：输入框、发送、打断，以及模型、权限模式、上下文用量、信息面板
 const { ref, reactive, computed, nextTick, watch } = Vue;
-import { api, touch, say, fail, fileSize, clock } from './util.js';
+import { api, touch, say, fail, fileSize, clock, modelName } from './util.js';
 import { withTab, takeRejected } from './tabs.js';
 import { callPoints, fen, accountOf } from './points.js';
 import { phaseLine, phaseStep, STEPS, SRC_CLASS, SRC_TIPS } from './phase.js';
@@ -245,7 +245,8 @@ export function useChat({ current, stickToBottom, readonly, createFrom, pushQuie
 
   async function sendChat() {
     const tab = current.value, text = tab && tab.draft.trim();
-    if (!tab || (!text && !tab.attach.length && !tab.files.length && !tab.staged?.length)) return;
+    // 从待办页开出的新会话（tab.todoNote，todos.js）输入框空着也能发：发的就是那段说明
+    if (!tab || (!text && !tab.attach.length && !tab.files.length && !tab.staged?.length && !(tab.fresh && tab.todoNote))) return;
     // 先查再清空：上一句还没发出去时直接清掉输入框，这句就丢了
     if (tab.sending) return say('上一条消息仍在发送，请稍候');
     if (tab.files.some(f => f.xhr)) return say('文件仍在上传，请稍候');
@@ -310,6 +311,10 @@ export function useChat({ current, stickToBottom, readonly, createFrom, pushQuie
   async function deliver(tab, text, images = [], files = []) {
     if (tab.sending) return say('上一条消息仍在发送，请稍候');
     tab.sending = true;
+    // 从待办页开出的新会话：那段说明拼在前面，用户写了话才隔一道 ---。
+    // 没建成时退回输入框的照旧只是用户写的那句（tab.failed.text），说明还挂在卡片上，重发时再拼
+    const said = text;
+    if (tab.fresh && tab.todoNote) text = tab.todoNote.text + (said ? `\n---\n${said}` : '');
     // 先把话挂出来、清空输入框，用户立刻看到反馈。待发的话排在前面，每一条各挂一个「发送中」气泡
     const withStaged = !tab.fresh && tab.staged?.length > 0;
     // 带着文件的，「发送中」气泡里先列出文件名（服务器写进记录的是完整路径，记录到了就换成那份）
@@ -354,7 +359,7 @@ export function useChat({ current, stickToBottom, readonly, createFrom, pushQuie
     } catch (e) {
       // 没发出去：撤掉气泡，把这句话连同图片留着，旁边给个重试按钮（待发的话还在服务器上，重试时照样一起带上）
       tab.pending = tab.pending.filter(x => !ids.includes(x.id));
-      tab.failed = { text, images, files, error: e.message };
+      tab.failed = { text: said, images, files, error: e.message };
       if (tab.fresh) tab.running = false;   // 还没有会话，没有推送来把状态那一块收掉
     }
     tab.sending = false;
@@ -422,7 +427,8 @@ export function useChat({ current, stickToBottom, readonly, createFrom, pushQuie
   });
 
   // 会话信息面板
-  const info = reactive({ open: false, loading: false, error: '', data: null, tab: '' });
+  // summary 是后台写的会话摘要（服务器 summaries.py），sumOpen 是点开了没有
+  const info = reactive({ open: false, loading: false, error: '', data: null, tab: '', summary: null, sumOpen: false, sumError: '' });
   // 模型下拉只给这三个，不列 CLI 报上来的那份，所以新会话标签页也不用等取列表。
   // 后两个性价比低，名字后面写明不推荐。GPT 号只能用 GPT 的模型，换成下面那几个（服务器的 instance.GPT_MODELS，第一个是默认）
   const claudeModels = [
@@ -450,9 +456,9 @@ export function useChat({ current, stickToBottom, readonly, createFrom, pushQuie
     { value: 'glm-5.3[1m]', displayName: 'GLM-5.3' },
   ];
   const lists = { claude: claudeModels, gpt: gptModels, deepseek: deepseekModels, glm: glmModels };
-  // 中转站号的下拉只列它接了的那几个：配置里写了名字就用，没写就照订阅号同一个模型的叫法
+  // 中转站号的下拉只列它接了的那几个：配置里写了名字就用，没写就照订阅号同一个模型的叫法，订阅号没有的（Gemini）照模型名写
   const relayList = models => models.map(m => ({ value: m.value,
-    displayName: m.label || claudeModels.find(c => c.value === m.value)?.displayName || m.value }));
+    displayName: m.label || claudeModels.find(c => c.value === m.value)?.displayName || modelName(m.value) }));
   const modelList = computed(() => {
     const t = current.value, relay = t && relayOf(t);
     return relay ? relayList(relay) : t ? lists[familyOf(t)] || claudeModels : claudeModels;
@@ -486,6 +492,19 @@ export function useChat({ current, stickToBottom, readonly, createFrom, pushQuie
   function openInfo() {
     info.open = true;
     loadInfo(true);
+    loadSummary();
+  }
+  // 会话摘要另取：会话信息要连着 Claude，摘要不用；还没写过是 null。旧后端没有这个接口（404）就不显示，别的错写明原因
+  async function loadSummary() {
+    const tab = current.value;
+    Object.assign(info, { summary: null, sumOpen: false, sumError: '' });
+    if (!tab || tab.fresh) return;
+    try {
+      const r = await api(`/api/tabs/${tab.id}/summary`);
+      if (current.value === tab) info.summary = r.summary;
+    } catch (e) {
+      if (e.status !== 404 && current.value === tab) info.sumError = `会话摘要取不到：${e.message}`;
+    }
   }
   async function setModel(value) {
     const tab = current.value;
@@ -661,9 +680,12 @@ export function useChat({ current, stickToBottom, readonly, createFrom, pushQuie
     }
     tab.cmdsBusy = false;
   }
-  watch(() => current.value?.draft, d => { if (d?.startsWith('/') && current.value) loadCmds(current.value); });
+  // 手机输入法打英文字母也要组字（字母下面带下划线），组字期间 v-model 不写回 tab.draft，卡片一直按「/」列出全部、不跟着筛
+  // 所以组字时改看输入框的实时内容 tab.typed（输入框的 input 事件记下，含还没上屏的字母），平时照旧看草稿
+  const cmdText = tab => (tab?.composing ? tab.typed : tab?.draft) || '';
+  watch(() => cmdText(current.value), d => { if (d.startsWith('/') && current.value) loadCmds(current.value); });
   function cmdMenu(tab) {
-    const m = /^\/(\S*)$/.exec(tab?.draft || '');
+    const m = /^\/(\S*)$/.exec(cmdText(tab));
     if (!m) return null;
     if (!tab.cmds) return { items: [], why: '正在加载指令…' };
     const q = m[1].toLowerCase(), all = tab.cmds.commands || [];
@@ -671,6 +693,9 @@ export function useChat({ current, stickToBottom, readonly, createFrom, pushQuie
     return { items, why: items.length ? '' : tab.cmds.why || `没有以「/${m[1]}」开头的指令` };
   }
   function pickCmd(tab, c) {
+    // 组字的半路点选：v-model 在组字期间不往输入框里写，先失焦把组字结束掉，再清掉 Vue 记的组字标记，填进去的指令才显示得出来
+    const el = composerInput.value;
+    if (tab.composing && el) { el.blur(); el.composing = false; tab.composing = false; }
     tab.draft = `/${c.name} `;
     nextTick(() => { composerInput.value?.focus(); autoGrow(); });
   }

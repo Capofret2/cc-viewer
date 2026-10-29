@@ -28,6 +28,9 @@ from instance import DATA
 FILE = DATA / "session_names.json"
 MAX_WIDTH = 12                          # 半角个数：6 个汉字，或者 12 个字母、数字
 NUDGE_CTX, NUDGE_USER, NUDGE_TOOLS = 100_000, 3, 10
+# 起名提醒先关掉（2026-10-29 主人说的：以后由会话摘要顺带起名，摘要在后台分叉出去写，不进对话，见 README 待办「会话摘要」）。
+# 条件和写法都留着，打开改回 True 就行；AI 自己用 ccname 起名照旧能用
+NUDGE_ON = False
 
 NUDGE = ("【会话起名】这个会话已经聊了一阵子，还没有用户起的名字。{now}请用 `{cmd} set <名字>` 按到现在为止在做的事给它起个名字"
          "（不超过 {width} 个字，字母、数字和半角符号各算半个），顺手做就行，不用问用户，也不用停下手上的事。这个提醒只有这一次。")
@@ -117,6 +120,30 @@ def handle(req: dict, sid: str) -> str:
     return f"好了：等这一轮结束、后台任务都停下以后，会话名改成「{name}」。\n"
 
 
+def propose(sid: str, name: str) -> str:
+    """会话摘要顺带起的名字（summaries.py，2026-10-29）：用户起的不覆盖，AI 起的可以换，和 ccname 不加 --force 一样记成待写。
+    返回没起成的原因，起成了（或已经是这个名字）是空字符串。"""
+    if broken:
+        return broken
+    if title_of is None:
+        return "查看器还不支持给会话起名"
+    try:
+        name = _check(name)
+    except HTTPException as e:
+        return str(e.detail)
+    kind, title = status(sid, title_of(sid))
+    if kind == "user":
+        return f"现在的名字「{title}」是用户自己起的，不改"
+    with _lock:
+        if name == title:
+            if _state["pending"].pop(sid, None) is not None:
+                _save()
+            return ""
+        _state["pending"][sid] = {"name": name, "force": False, "ts": time.time(), "by": "summary"}
+        _save()
+    return ""
+
+
 def pending() -> dict[str, dict]:
     with _lock:
         return {k: dict(v) for k, v in _state["pending"].items()}
@@ -164,7 +191,7 @@ def nudged(sid: str) -> bool:
 
 def nudge(sid: str, kind: str, title: str, ctx: int, said: int, tools: int, cmd: str) -> str:
     """条件都满足、还没提醒过就记下「提醒过了」，返回要附进对话的提醒；否则返回空字符串。"""
-    if broken or kind == "user" or ctx < NUDGE_CTX or said <= NUDGE_USER or tools <= NUDGE_TOOLS:
+    if not NUDGE_ON or broken or kind == "user" or ctx < NUDGE_CTX or said <= NUDGE_USER or tools <= NUDGE_TOOLS:
         return ""
     with _lock:
         if sid in _state["nudged"]:

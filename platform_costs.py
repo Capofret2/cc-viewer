@@ -57,6 +57,8 @@ def _get(account, path, authenticated=False):
         conn = http.client.HTTPSConnection(host, 443, timeout=5, context=ssl.create_default_context())
     headers = {'Accept': 'application/json', 'Connection': 'close'}
     if authenticated:
+        # 只用这把钥匙查它自己的消费；IKunCode 的日志接口不认账号访问令牌（2026-10-30 实测 401），
+        # 同站第二把令牌（model_keys 并号）的消费拉不到实扣，按配置单价预估
         headers['Authorization'] = 'Bearer ' + api_relay.key(account)
     try:
         conn.request('GET', path, headers=headers)
@@ -192,6 +194,8 @@ def _state(db, account):
 
 def sync(account):
     check_account(account)
+    if instance.remote_billed(account):
+        raise CostError('这个账号由远端结算，不能再用导出密钥查询原平台')
     lock = _locks.setdefault(account, threading.Lock())
     if not lock.acquire(blocking=False):
         raise CostError('这个账号的平台账单正在同步，请稍后查看')
@@ -207,16 +211,32 @@ def sync(account):
             if not isinstance(data, list):
                 raise CostError('平台令牌日志接口不再返回列表，未更新缓存')
             records = [normalize(row, unit) for row in data]
-            keys = [r['key'] for r in records]
+            # 同一个请求编号这批里可能出现多条记录（2026-10-29 空悲切把同一个编号的错误记了两条，站内重试成功又和失败共用编号）。
+            # 内容一样的只留一条；内容不同的按内容把键分岔——键完全由这行的内容决定，下次拉取算出的还是它，照样不会重复入账。
+            # 以前按裸编号存下的那行（这批里它分岔了）先删掉，由分岔后的键原样接上，不留双份。
+            groups: dict[str, list[dict]] = {}
+            for r in records:
+                groups.setdefault(r['key'], []).append(r)
+            rows, rekeyed = [], set()
+            for base, got in groups.items():
+                bodies = {json.dumps(r, ensure_ascii=False, sort_keys=True): r for r in got}
+                if len(bodies) > 1:
+                    rekeyed.add(base)
+                    rows += [{**r, 'key': hashlib.sha256((base + ':' + body).encode()).hexdigest()} for body, r in bodies.items()]
+                else:
+                    rows.append(next(iter(bodies.values())))
+            keys = [r['key'] for r in rows]
             if len(keys) != len(set(keys)):
-                raise CostError('平台本次返回重复请求编号，无法安全去重，未更新缓存')
+                raise CostError('平台日志去重后仍有重复的键，未更新缓存')
             now = time.time()
             with database() as db, db:
+                if rekeyed:
+                    db.executemany('DELETE FROM logs WHERE account=? AND key=?', [(account, k) for k in rekeyed])
                 known = {r[0] for r in db.execute('SELECT key FROM logs WHERE account=?', (account,))}
                 new_keys = set(keys) - known
                 # 接口只提供最近记录，停机期间可能发生缺口，不能宣称拉全了历史。
                 gap = bool(known and keys and not known.intersection(keys))
-                for r in records:
+                for r in rows:
                     db.execute('INSERT OR REPLACE INTO logs VALUES (?,?,?,?,?)',
                                (account, r['key'], r['created_at'], r['request_id'], json.dumps(r, ensure_ascii=False)))
                 state = {**old, 'attempt_at': now, 'success_at': now, 'error': '', 'received': len(records),
@@ -236,7 +256,10 @@ def sync(account):
 
 def estimate(account, model, use):
     """人民币对账，不使用账本的折扣；未知一小时单价不当作零。"""
+    import rates
     row = instance.API[account].get('rates', {}).get(model)
+    if row and use is not None:
+        row = rates.tier_row(row, use)   # 长上下文分档：超过门槛的整笔按长档算
     if not row or use is None:
         return {'estimated_yuan': None, 'known_yuan': None, 'price_note': '没有本地模型单价或完整用量'}
     try:
@@ -311,7 +334,8 @@ _price_lock = threading.RLock()
 
 def version():
     """内存版本；推送每轮都读，不在事件循环查磁盘。"""
-    return _price_generation
+    import remote_costs
+    return _price_generation + remote_costs.version()
 
 
 def refresh_prices():
@@ -338,6 +362,8 @@ def refresh_prices():
 
 
 def ensure_prices():
+    import remote_costs
+    remote_costs.ensure()
     if _price_loaded != str(instance.DATA):
         refresh_prices()
 
@@ -350,22 +376,50 @@ def price_for(account, mid):
 
 def call_prices(account_by_mid):
     """只给当前可见会话的回复，不能把整把 API key 的日志送给普通会话参与者。"""
-    return {mid: {'account': account, 'estimated': (value := price_for(account, mid)) is None, 'yuan': value}
-            for mid, account in account_by_mid.items() if enabled(account)}
+    import remote_costs
+    result = {}
+    for mid, account in account_by_mid.items():
+        if remote_costs.marked(mid):
+            value = remote_costs.price(account, mid)
+            result[mid] = {'account': account, 'remote': True,
+                           'estimated': value is None or value['estimated'],
+                           'yuan': value['yuan'] if value else None,
+                           'error': remote_costs.error(account)}
+        elif enabled(account):
+            value = price_for(account, mid)
+            if value is None:   # 并号的模型（model_keys）：实扣挂在持钥匙的号名下
+                for holder in set((instance.API.get(account) or {}).get('model_keys', {}).values()):
+                    if enabled(holder) and (found := price_for(holder, mid)) is not None:
+                        value = found
+                        break
+            result[mid] = {'account': account, 'estimated': value is None, 'yuan': value}
+    return result
 
 
 def quote(mid, account, model, use):
     """供账本/汇总使用：实扣优先；未查到时按配置预估，缺一小时价临时用普通写入价。"""
+    import remote_costs
+    if remote_costs.marked(mid):
+        return remote_costs.quote(mid, account, model, use)
     if not enabled(account):
+        # 同一 GLM 模型可能混有直连和远端调用；全部带金额，聚合时不会漏掉没有金额字段的旧用量。
+        if instance.is_api_model(model):
+            import rates
+            value = rates.cost(rates.load(True), {'model': model, 'use': use}) * rates.FEN / 100
+            return {**use, 'charge_yuan': value, 'estimated_calls': 0}
         return use
     ensure_prices()
     value = price_for(account, mid)
+    if value is None and (holder := (instance.API.get(account) or {}).get('model_keys', {}).get(model, account)) != account \
+       and enabled(holder):
+        value = price_for(holder, mid)   # 并号的模型：实扣挂在持钥匙的号名下（api_relay.forward 的本地回包按它记）
     estimated = value is None
     if estimated:
-        base = model.split('@account=')[0].split('[')[0]
-        r = instance.API[account].get('rates', {}).get(base)
+        import rates
+        r = rates.api_price(account, model)
         if not r:
             raise CostError('平台费用尚未取得，且此模型没有可用的预估单价')
+        r = rates.tier_row(r, use)   # 长上下文分档：超过门槛的整笔按长档算
         hour = use.get('cw1h', 0)
         amount = sum(Decimal(str(use.get(k, 0))) * _decimal(r[k]) for k in ('in', 'out', 'cr', 'cw'))
         amount += Decimal(str(hour)) * (_decimal(r.get('cw1h', r['cw'])) - _decimal(r['cw']))
@@ -374,12 +428,28 @@ def quote(mid, account, model, use):
 
 
 async def poll():
+    import remote_costs
+    # 同一站有几把钥匙（并号）就轮流查、每轮只查一把：同 IP 每分钟几次会被平台限流（2026-10-30 IKun 实测两把各拉一次就 429）
+    turn: dict[str, int] = {}
     while True:
+        sites: dict[str, list[str]] = {}
         for account in accounts():
+            if instance.remote_billed(account):
+                continue
+            sites.setdefault(instance.RELAY[account]['host'], []).append(account)
+        for host, names in sorted(sites.items()):
+            names.sort()
+            account = names[turn.get(host, 0) % len(names)]
+            turn[host] = turn.get(host, 0) + 1
             try:
                 await asyncio.to_thread(sync, account)
             except (CostError, OSError, sqlite3.Error) as exc:
                 print(f'{account} 平台账单同步失败：{exc}', flush=True)
+        for account in remote_costs.accounts():
+            try:
+                await asyncio.to_thread(remote_costs.sync, account)
+            except (remote_costs.CostError, OSError, sqlite3.Error) as exc:
+                print(f'{account} 远端费用同步失败：{exc}', flush=True)
         await asyncio.sleep(INTERVAL)
 
 

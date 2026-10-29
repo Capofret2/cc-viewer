@@ -122,15 +122,19 @@ export function modelName(m) {
   if (x) return `DeepSeek ${x[1].split('-').map(cap).join(' ')}`;
   x = id.match(/^glm-([0-9.]+)(?:-([a-z]+))?$/);   // 智谱：glm-5.3 → GLM-5.3，glm-5.3-flash → GLM-5.3 Flash
   if (x) return `GLM-${x[1]}${x[2] ? ' ' + cap(x[2]) : ''}`;
+  x = id.match(/^gemini-([0-9.]+)-([a-z-]+)$/);   // Gemini（经某个中转站接入）：gemini-4-argon → Gemini 4 Argon
+  if (x) return `Gemini ${x[1]} ${x[2].split('-').map(cap).join(' ')}`;
   return id;
 }
-// 模型是哪一家的：gpt、deepseek、glm（智谱），其余都算 claude（同服务器 instance.model_family）。号只能用自家的模型
-export const modelFamily = m => (/^gpt-/.test(m || '') ? 'gpt' : /^deepseek-/.test(m || '') ? 'deepseek' : /^glm-/.test(m || '') ? 'glm' : 'claude');
+// 模型是哪一家的：gpt、deepseek、glm（智谱）、gemini，其余都算 claude（同服务器 instance.model_family）。号只能用自家的模型
+export const modelFamily = m => (/^gpt-/.test(m || '') ? 'gpt' : /^deepseek-/.test(m || '') ? 'deepseek' : /^glm-/.test(m || '') ? 'glm'
+  : /^gemini-/.test(m || '') ? 'gemini' : 'claude');
 // 气泡头部的模型名用什么样式：每家各只有一个推荐模型，就是各自的默认模型（chat.js 模型下拉的第一项、instance.GPT_MODELS 的第一个）。
-// Opus 5.5、DeepSeek Flash（这家只接了它）照常写；GPT-6 Astra 加粗；其余的（含认不出的编号）都是不推荐的，黄色加粗；CLI 自己写的提示不是模型请求，不标
+// Opus 5.5、DeepSeek Flash（这家只接了它）、Gemini 4 Argon（用户要用的三个模型之一）照常写；GPT-6 Astra 加粗；
+// 其余的（含认不出的编号）都是不推荐的，黄色加粗；CLI 自己写的提示不是模型请求，不标
 export function modelTier(m) {
   const id = (m || '').replace(OFFPEAK, '').replace(/\[.*\]$/, '');
-  if (!id || id === '<synthetic>' || id === 'claude-opus-5-5' || id === 'deepseek-flash' || id === 'glm-5.3') return '';
+  if (!id || id === '<synthetic>' || ['claude-opus-5-5', 'deepseek-flash', 'glm-5.3', 'gemini-4-argon'].includes(id)) return '';
   return id === 'gpt-6-astra' ? 'model-gpt' : 'model-warn';
 }
 // 记录里的时间：当天的只写时分秒，不是当天的前面写上日期（不是今年的再加年份），不然旧会话看着像今天发生的
@@ -144,6 +148,8 @@ export const clockSpan = (from, to) => {
   return `${clock(from)}–${sameDay(a, b) ? timeOf(b) : clock(to)}`;
 };
 export const kilo = n => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n));
+// 不留小数的 k（底下那排的上下文小标签用）：一千以上一律写多少 k，一百万写 1000k
+export const kiloInt = n => (n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n));
 export const ago = s => {
   const m = Math.round((Date.now() / 1000 - s) / 60);
   return m < 1 ? '刚刚' : m < 60 ? `${m} 分钟前` : m < 1440 ? `${Math.round(m / 60)} 小时前` : `${Math.round(m / 1440)} 天前`;

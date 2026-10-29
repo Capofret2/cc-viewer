@@ -35,7 +35,8 @@ TOOLS = {"Read", "Edit", "Write"}
 AUDIT_ATTACHMENTS = {"environment", "model", "session_context", "date", "credential_org", "prompt_snapshot",
                      "deferred_tools_record", "total_tokens_reminder", "silent_turn_reminder"}
 IDENTITY = "You are a Claude agent, built on Anthropic's Claude Agent SDK."
-# 未结束的任务最多收这么多份，同时执行也以它为上限（比如几个审稿位要一起审）。同一个号上默认一份接一份，调用方可以要求并行（parallel）
+# 每人未结束的任务最多收这么多份，同时执行也以它为上限，一个人排满不挡别人。
+# 号那一侧另有保护：同一个号上默认一份接一份，调用方可以要求并行（parallel）
 MAX_JOBS = 24
 MAX_PARALLEL = 8
 _service = None
@@ -47,7 +48,9 @@ SDK_ENV = {"CLAUDE_CODE_DISABLE_AUTO_MEMORY", "ENABLE_CLAUDEAI_MCP_SERVERS", "CL
            "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "MAX_THINKING_TOKENS", "CLAUDE_AGENT_SDK_CLIENT_APP"}
 SDK_SETTINGS = {"autoMemoryEnabled", "disableClaudeAiConnectors"}
 SDK_EXTRA = {"disable-slash-commands"}
-SDK_MODES = {"default", "dontAsk", "acceptEdits"}
+# bypassPermissions 2026-10-29 起放开（ccagent --bypass）：派出去的子代理是主代理的工具，由主代理负责，和 Claude Code 自带的子代理一样能全开
+SDK_MODES = {"default", "dontAsk", "acceptEdits", "bypassPermissions"}
+TOOLS_PRESET = {"type": "preset", "preset": "claude_code"}   # 工具写成这个就是 Claude Code 默认的全套工具
 SDK_FIELDS = {"system_prompt", "tools", "allowed_tools", "disallowed_tools", "setting_sources", "skills", "mcp_servers",
               "strict_mcp_config", "model", "effort", "thinking", "max_turns", "max_budget_usd", "permission_mode",
               "cwd", "add_dirs", "env", "settings", "extra_args", "verbatim_prompts",
@@ -57,6 +60,24 @@ UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 
 def is_run(sid):
     return bool((users.owners.get(sid) or {}).get("workflow"))
+
+
+_kids = (0, 0.0, {})   # (登记的会话数, 建的时刻, 发起会话 → 它派出去的工作流会话)
+
+
+def runs_of(parent):
+    """从这个会话派出去的工作流任务（各自的会话编号）。会话的花费要把它们算进来（server.spend_fields，2026-10-29 主人说的）。
+    登记一份任务时先记主人、再补 workflow，会话数变了或者过了十秒就重建，不会一直漏掉刚补上的"""
+    global _kids
+    n, at, kids = _kids
+    if n != len(users.owners) or time.monotonic() - at > 10:
+        kids = {}
+        for sid, o in list(users.owners.items()):
+            w = (o or {}).get("workflow")
+            if isinstance(w, dict) and w.get("parent"):
+                kids.setdefault(w["parent"], []).append(sid)
+        _kids = (len(users.owners), time.monotonic(), kids)
+    return kids.get(parent, [])
 
 
 def save(path, obj):
@@ -113,14 +134,15 @@ def check_sdk(raw):
             or sp.get("type") == "preset" and sp.get("preset") == "claude_code" and isinstance(sp.get("append", ""), str))):
         raise ValueError("system_prompt 只支持文字、custom 或 claude_code 预设（不支持从文件读）")
     tools = o.get("tools")
-    if not isinstance(tools, list) or not all(isinstance(t, str) for t in tools):
-        raise ValueError("请明写 tools（不用工具就写 []）：不写时 Claude Code 默认的工具全开")
-    if not set(tools) <= TOOLS:
-        raise ValueError("查看器入口只开放 Read、Edit、Write 三个工具")
+    # 工具名不再只限 Read、Edit、Write（2026-10-29）：子代理是调用方的工具，用什么由调用方定、由调用方负责；
+    # 仍要明写，不写时 Claude Code 默认全开，写成 claude_code 预设才是全开
+    if tools != TOOLS_PRESET and (not isinstance(tools, list) or not all(isinstance(t, str) for t in tools)):
+        raise ValueError("请明写 tools（不用工具就写 []，全套工具写 {\"type\": \"preset\", \"preset\": \"claude_code\"}）："
+                         "不写时 Claude Code 默认的工具全开")
     for k in ("allowed_tools", "disallowed_tools", "add_dirs"):
         if not isinstance(o.get(k, []), list) or not all(isinstance(x, str) for x in o.get(k, [])):
             raise ValueError(f"{k} 必须是文字列表")
-    if not set(o.get("allowed_tools", [])) <= set(tools):
+    if isinstance(tools, list) and not set(o.get("allowed_tools", [])) <= set(tools):
         raise ValueError("allowed_tools 只能写 tools 里有的工具名")
     if not isinstance(o.get("model"), str) or not o["model"]:
         raise ValueError("请明写 model：查看器按模型挑号、计价，不按 CLI 的默认模型猜")
@@ -130,7 +152,7 @@ def check_sdk(raw):
     if th is not None and not (isinstance(th, dict) and th.get("type") in ("adaptive", "enabled", "disabled")):
         raise ValueError("thinking 只支持 adaptive、enabled、disabled")
     if o.get("permission_mode") not in (None, *SDK_MODES):
-        raise ValueError("permission_mode 只支持 default、dontAsk、acceptEdits")
+        raise ValueError("permission_mode 只支持 default、dontAsk、acceptEdits、bypassPermissions")
     if not isinstance(o.get("cwd"), str) or not os.path.isabs(o["cwd"]):
         raise ValueError("缺少绝对路径的 cwd（客户端不写时用自己的当前目录）")
     for d in o.get("add_dirs", []):
@@ -171,7 +193,11 @@ def validate(raw):
     if not isinstance(raw, dict):
         raise ValueError("任务必须是 JSON 对象")
     known = {"key", "prompt", "system", "account", "model", "effort", "backend", "label", "cwd",
-             "tools", "read_files", "write_files", "timeout", "sdk", "group", "parallel"}
+             "tools", "read_files", "write_files", "timeout", "sdk", "group", "parallel", "audit"}
+    # audit 写 false 是不做上下文核验（ccagent 派的子代理用）：核验是给实验和自动审稿保证上下文干净的，
+    # 当子代理用时读到工作区的 CLAUDE.md、用 Bash 都是正常的，核验只会把好好的结果判成失败
+    if "audit" in raw and not isinstance(raw["audit"], bool):
+        raise ValueError("audit 只能写 true 或 false")
     if set(raw) - known:
         raise ValueError("不认识的任务字段：" + "、".join(sorted(set(raw) - known)))
     if "sdk" in raw:
@@ -184,7 +210,7 @@ def validate(raw):
              "backend": "viewer", "model": o["model"], "effort": o.get("effort") or "",
              "prompt": json.dumps(sdk["prompt"], ensure_ascii=False) if not isinstance(sdk["prompt"], str) else sdk["prompt"],
              "system": sp if isinstance(sp, str) else (sp or {}).get("prompt") or (sp or {}).get("append") or "",
-             "tools": list(o["tools"]), "read_files": [], "write_files": []}
+             "tools": list(o["tools"]) if isinstance(o["tools"], list) else [], "read_files": [], "write_files": []}
     else:
         r = {"system": "", "account": "auto", "model": "claude-opus-5-5", "effort": "high",
              "backend": "viewer", "label": "工作流任务", "tools": [], "read_files": [], "write_files": [],
@@ -239,7 +265,9 @@ def file_policy(req):
             if not real.is_dir():
                 raise ValueError("目录不存在：" + d)
             roots.append(str(real))
-        return {"tools": list(o["tools"]), "system": req["system"], "roots": roots, "sdk": o}
+        # tools 为 None 是 claude_code 预设（全套）；bypass 和 Claude Code 的 bypass 一样不再逐次拦，由调用方负责
+        return {"tools": list(o["tools"]) if isinstance(o["tools"], list) else None, "system": req["system"],
+                "roots": roots, "sdk": o, "bypass": o.get("permission_mode") == "bypassPermissions"}
     if not req["tools"]:
         return {"tools": [], "system": req["system"], "files": {}, "write": []}
     root = hostfs.Path(req["cwd"]).resolve(strict=True)
@@ -260,10 +288,14 @@ def file_policy(req):
 
 def tool_denial(profile, inp):
     name, args = inp.get("tool_name"), inp.get("tool_input") or {}
-    if name not in profile["tools"]:
+    if profile.get("bypass"):
+        return ""
+    if profile["tools"] is not None and name not in profile["tools"]:
         return "这个任务没有开放该工具"
     raw = args.get("file_path")
     if "roots" in profile:
+        if raw is None and name not in TOOLS:   # 不碰具体文件的工具（Bash、Grep 之类）不按目录拦，放不放行照权限模式
+            return ""
         if not isinstance(raw, str) or not os.path.isabs(raw):
             return "只收绝对路径"
         try:
@@ -286,13 +318,15 @@ def tool_denial(profile, inp):
 
 
 def expected_context(request):
-    """核验时系统提示应该是什么样（None 是不核文字：调用方用了 Claude Code 预设），以及允许出现哪些工具。"""
+    """核验时系统提示应该是什么样（None 是不核文字：调用方用了 Claude Code 预设），以及允许出现哪些工具（None 是不核：全套工具）。"""
     tools = set(request["tools"]) | {"DeferredToolPlaceholder"}
     if "sdk" not in request:
         return [IDENTITY] + ([request["system"]] if request["system"] else []), tools
     o = request["sdk"]["options"]
     sp = o.get("system_prompt")
-    if (o.get("env") or {}).get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") != "1" and o["tools"]:
+    if not isinstance(o["tools"], list):
+        tools = None
+    elif (o.get("env") or {}).get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") != "1" and o["tools"]:
         tools.add("advisor")   # 带工具时 CLI 自己加的服务端工具；调用方没关它，官方 SDK 下也会有，照实放行
     if isinstance(sp, dict) and sp.get("type") == "preset":
         return None, tools
@@ -320,7 +354,7 @@ def audit_context(path, request):
                 if expected is not None and texts != expected:
                     problems.add("系统提示与指定内容不一致")
                 actual = {t.get("name") for t in shape.get("tools", [])}
-                if not actual <= tools:
+                if tools is not None and not actual <= tools:
                     problems.add("请求带了额外工具")
     if not shapes:
         problems.add("记录没有请求快照，尚未核验")
@@ -414,7 +448,7 @@ class Service:
         self.loop = asyncio.get_running_loop()
         self.jobs, self.tasks, self.drivers = {}, {}, {}
         self.closing = False
-        self.slots = asyncio.Semaphore(MAX_JOBS)
+        self.slots = {}   # 用户 → 他同时执行的名额（MAX_JOBS），按人分开
         self.submit_lock = asyncio.Lock()
         # 每个号上正在跑和已经挑定、等着开跑的份数。挑号和占位在同一把锁里做完，几份同时挑号时不会都挑中同一个空号
         self.busy, self.pending = {}, {}
@@ -434,9 +468,10 @@ class Service:
             allowed, opened = [], False
         if not isinstance(allowed, list) or not all(isinstance(x, str) for x in allowed):
             raise ValueError("工作流访问名单格式错误")
+        # 名单里写 "*" 就是开给这个实例的所有网页账号，仍然只认已注册的账号；
         # 单用户实例没有注册用户表，只有一个人：有名单文件就算开放，不看名单里写了谁
         if users.MULTI:
-            ok = bool(user) and user in allowed and user in users.users
+            ok = bool(user) and user in users.users and ("*" in allowed or user in allowed)
         else:
             ok = opened and user == users.CALL
         if not ok:
@@ -506,8 +541,8 @@ class Service:
                     if old["fingerprint"] != fingerprint:
                         raise ValueError("这个 key 已提交过其他内容，请明确使用新 key")
                     return self.view(old)
-                if sum(x["state"] not in TERMINAL for x in self.jobs.values()) >= MAX_JOBS:
-                    raise RuntimeError("等待中的任务已满，请先等现有任务结束")
+                if sum(x["state"] not in TERMINAL and x["owner"] == user for x in self.jobs.values()) >= MAX_JOBS:
+                    raise RuntimeError(f"这个用户还没结束的任务已经有 {MAX_JOBS} 份，请先等现有任务结束")
                 sid, src = self.lineage(r, user) if "sdk" in r else (str(uuid.uuid4()), None)
                 rec = {"id": jid, "owner": user, "parent": parent, "session_id": sid,
                        "fingerprint": fingerprint, "request": r, "state": "queued", "created": time.time()}
@@ -525,6 +560,8 @@ class Service:
                              if r["owner"] == user][:100]}
         if op == "pool":
             return {"accounts": await asyncio.to_thread(self.pool, user)}
+        if op == "models":
+            return await asyncio.to_thread(self.models, user)
         rec = self.jobs.get(req.get("id"))
         if not rec or rec["owner"] != user:
             raise PermissionError("没有这个用户能访问的任务")
@@ -592,7 +629,7 @@ class Service:
             try:
                 host.check_web_account(account)
                 host.check_paid(me, None, account)
-                why = host.rates.unpriced(r["model"]) or host.limit_block(
+                why = host.rates.unpriced(host.rates.billing_model(r["model"], account)) or host.limit_block(
                     None, me.name, account, r["model"], len((r["prompt"] + r["system"]).encode()))
                 if why:
                     raise ValueError(why)
@@ -659,6 +696,31 @@ class Service:
             })
         return out
 
+    def models(self, user):
+        """ccagent models：这个人能派哪些号、哪些模型。Claude 号就是号池（不写号时自动从里面挑）；
+        点名才用的 API 号、GPT 号各列出它接了哪几个模型，付不付得起照网页上的规矩（check_paid）"""
+        host = self.host
+        me = users.Who(user, user in users.ADMINS)
+        claude = [{"account": p["account"], "usable": p["usable"], "why_not": p["why_not"],
+                   "predicted_left": p["predicted_left"]} for p in self.pool(user)]
+        named = []
+        for a in [*host.API, *host.GPT]:
+            if (a not in host.ACCOUNTS or a in host.BANNED or a in host.API_ENTRIES
+                    or a in host.REMOTE or a in host.REMOTE_GPT):
+                continue
+            try:
+                host.check_web_account(a)
+                host.check_paid(me, None, a)
+                why = ""
+            except (HTTPException, ValueError) as e:
+                why = str(getattr(e, "detail", e))
+            named.append({"account": a, "models": list(host.api_models(a)) if a in host.API else list(host.GPT_MODELS),
+                          "usable": not why, "why_not": why})
+        # Claude 号能选的模型就是单价表里有价的 Claude 模型（没价的会被 unpriced 拦下）；带 @ 的是空闲时段那一条，不是能选的模型
+        table = host.rates.load()
+        claude_models = sorted(k for k in table if host.rates.model_family(k) == "claude" and "@" not in k)
+        return {"claude": claude, "claude_models": claude_models, "named": named}
+
     async def take(self, rec):
         """挑号并占一个位置：挑号和占位在同一把锁里，几份同时挑号时按占位数错开。返回号。"""
         async with self.choose_lock:
@@ -685,7 +747,7 @@ class Service:
         d = None
         account = None
         try:
-            async with self.slots:
+            async with self.slots.setdefault(rec["owner"], asyncio.Semaphore(MAX_JOBS)):
                 await asyncio.to_thread(self.authorize, rec["owner"], rec["parent"])
                 rec.update(state="checking")
                 await self.store(rec)
@@ -740,8 +802,11 @@ class Service:
                     path = await asyncio.to_thread(self.host.calls.find, rec["session_id"])
                     if path:
                         await asyncio.to_thread(self.host.api_calls.record, path, d.account, "web")
-                    rec["context_audit"] = await asyncio.to_thread(audit_context, path, r)
-                    if rec["state"] == "completed" and not rec["context_audit"]["verified"]:
+                    if r.get("audit") is False:
+                        rec["context_audit"] = {"verified": None, "skipped": "调用方关掉了上下文核验（audit: false）"}
+                    else:
+                        rec["context_audit"] = await asyncio.to_thread(audit_context, path, r)
+                    if rec["state"] == "completed" and rec["context_audit"]["verified"] is False:
                         rec.update(state="failed", error="上下文核验未通过；结果已保留，但不作为合格输出")
                 except Exception as e:
                     rec.update(state="failed", error=f"调用归属收尾失败：{e}")

@@ -1,0 +1,79 @@
+#!/usr/bin/python3 -I
+"""ccrecall：回忆，在用户自己以前的全部会话里抓正文气泡。只读，只能在网页上开的会话里用，只搜得到会话主人自己的会话。
+
+    ccrecall grep [词] [-u] [-a] [-s] [--long-summary] [--from 时刻] [--to 时刻] [--days 天数] [--head N] [--tail N] [--per N]
+                  [--sess 编号开头,…] [--cwd 字] [--born-from/--born-to 时刻] [--last-from/--last-to 时刻]
+                  [--min-bubbles/--max-bubbles N] [--min-user N] [--min-ctx/--max-ctx K] [--min-cost/--max-cost 元] [-n 80] [--cut 字数]
+
+正文气泡就是用户和助手说的话（用户在助手干活中途插的话也算）；系统注入的上下文、元消息、压缩摘要、工具调用和工具返回都不算。
+几秒出结果，每次都扫全部会话。不要自己写 grep 或脚本去扫会话记录。
+  词：大小写敏感，中文一个字、英文两个字母起。词可以不给，这时给出符合下面条件的全部气泡，但至少要给一个条件。
+  气泡分几类：-u 用户说的话，-a 助手说的话，-s 会话的 100 字短摘要，--long-summary 会话的 1000 字长摘要。
+  写了几类就只要这几类（几类之间是「或」，比如 -u -s 是用户的话加短摘要）；一类都不写是前三类，不含长摘要。
+  气泡条件：--from、--to 按气泡说话的时刻筛（北京时间，写 10-25、10-25 20:00 或 2026-10-25 20:00，--to 含那一分钟或那一天）；
+  --days 只要最近几天说的话（比如整理这一周的进展：ccrecall grep -u --days 7 先看用户这一周都说了什么）。
+  --head N、--tail N 是每个会话里符合上面条件的最前面、最后面 N 条（-u --tail 2 就是用户最后说的两句，两个都给是开头加末尾），
+  --per N 是每个会话最多给 N 条、在这个会话里均匀抽；这三个都不算摘要的名额。
+  会话条件（整个会话符合才要它的气泡）：--sess 编号开头，好几个用逗号隔开；--cwd 工作目录里含这几个字；
+  --born-from、--born-to 新建（第一条气泡）的时刻；--last-from、--last-to 最后一条气泡的时刻；--min-bubbles、--max-bubbles 正文气泡的条数；
+  --min-user 用户说的话至少几条（--min-user 3 能筛掉一问一答的测试会话）；--min-ctx、--max-ctx 现在的上下文（K token）；
+  --min-cost、--max-cost 一共花了多少元（含子代理，按收钱单价算，没扣预定付掉的部分）。
+  所有条件同时满足的才留下。判断不了的会话（原文件已删读不到工作目录、花费没在时限内算出）不算符合，总数前面会报有几个。
+  抓到气泡以后要看那个会话的上下文：grep --sess <编号开头>，只看某一段就再加 --from、--to 或者词。
+  要看一批会话各在做什么、停在哪：grep -u -s --last-from … --min-user 3 --head 1 --tail 2（第一句、最后两句加短摘要）。
+  要找某个时候说过话的会话：grep --from … --to …，看最前面「气泡最多的会话」。
+输出先是总数和气泡最多的几个会话，再按会话分组：每组开头一行写会话编号开头、会话主人、条数和会话概况（新建、最后一条的时刻，
+气泡条数，上下文，花费，工作目录）；组里一行一条：时间、谁说的、文字，按时间从旧到新；会话之间的先后每次随机，不代表什么。
+  文字：给了词是命中处前后约 100 字，没给词是开头约 200 字，截掉的地方写明前面、后面还有多少字；--cut 改这个字数，--cut 0 给全文。
+  超过 -n 条（默认 80）时在全部符合条件的气泡里均匀地随机抽，再搜一次换一批。
+会话没有标题，也没有概述；自动起的标题和随手抓的一句话都不能拿来判断会话内容，要知道一个会话做了什么，就抓它的气泡来看。
+原文件已被 Claude Code 按保留天数删掉的会话，索引里还留着正文的照样搜得到。
+摘要是查看器在后台给每个会话写的（会话聊多了以后离开约 45 分钟才写，很多会话还没有），只算最新的一份，谁说的写「摘要」「长摘要」。
+摘要的时刻是写摘要的时候，不一定是会话的最后一条：写完以后会话可能又往下聊了，要看停在哪还得看最后几条气泡（抬头里有最后一条的时刻）。
+"""
+# 上面那段是 --help 打印给会话里的 AI 看的，只写用法（照 sessions.py 开头那段，去掉了查看器账号才用得上的 --who 和密码）。
+# 服务端是查看器的 sessions.serve_request，经人设卡接口的套接字（personas.py，op=recall）：靠内核报来的进程号认出是哪个会话、主人是谁，
+# 查看器以自己的身份只搜这个实例里主人是他的会话；套接字地址和 ccpersona 一样经环境变量 CC_VIEWER_PERSONA 给。参数原样交给服务端。
+import json
+import os
+import socket
+import sys
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if not argv or any(x in ("-h", "--help", "help") for x in argv):
+        print(__doc__.strip())
+        return 0
+    path = os.environ.get("CC_VIEWER_PERSONA")
+    if not path:
+        print("ccrecall：只能在网页上开的会话里使用（这个会话里找不到查看器的接口）", file=sys.stderr)
+        return 2
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(40)   # 服务端最多搜二十几秒，超时会自己回话说明
+    try:
+        s.connect(path)
+        s.sendall(json.dumps({"op": "recall", "argv": argv}, ensure_ascii=False).encode() + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = s.recv(1 << 16)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as e:
+        print(f"ccrecall：连不上查看器的接口（{path}：{e}），网页查看器可能正在重启，过一会儿再试", file=sys.stderr)
+        return 1
+    finally:
+        s.close()
+    try:
+        r = json.loads(buf)
+    except ValueError:
+        print("ccrecall：查看器的接口没回话就断开了", file=sys.stderr)
+        return 1
+    sys.stdout.write(r.get("out", ""))
+    sys.stderr.write(r.get("err", "").replace("ccpersona：", "ccrecall：", 1))
+    return int(r.get("exit", 1))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

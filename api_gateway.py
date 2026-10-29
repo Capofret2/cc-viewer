@@ -57,3 +57,8 @@ def held(account):
 
 def cut(driver):
     return None
+
+
+def listed_cards(user=None):
+    """账号页列外部会话用：开源版没有对外接口，一张都没有。"""
+    return []

@@ -1,0 +1,183 @@
+#!/usr/bin/python3 -I
+"""ccagent：把一件事派给另一个 Claude Code 去做（可以换号、换模型），等它做完，打出它最后的回复，像子代理一样。
+
+  ccagent [选项] "任务"          派一个子代理，等它做完，标准输出是它最后的回复
+  ccagent [选项] -f 任务.md      任务文字从文件读（- 是标准输入），长任务这样交
+  ccagent models                列出能用的号和模型
+
+选项：
+  --model 模型     不写是 claude-opus-5-5；GPT 号、DeepSeek 这类的模型要和 --account 一起写（不写模型时用那个号的第一个模型）
+  --account 号     指定号；不写就自动挑一个 Claude 号
+  --effort 强度    low、medium、high、xhigh、max，默认 high
+  --read 文件      开放这个文件给它读，几个文件就写几次 --read
+  --write 文件     开放这个文件给它读写（文件要事先存在），几个文件就写几次 --write
+  --bypass         全开：和 Claude Code 的 bypass 模式一样，什么工具都能用（Bash 也有），工作目录是 --cwd
+  --cwd 目录       --bypass 时子代理的工作目录，默认当前目录
+  --timeout 秒     最长跑多久，默认 2400
+  --label 名字     任务名
+
+默认只对话、不碰文件。子代理是你的工具，它做的事由你负责。它看不到你的对话，要的材料都写进任务里，或者开放文件给它。
+它背后是一个完整的 Claude Code（--bypass 时带着 Claude Code 自己的系统提示），读不到运行它的那个系统用户的全局记忆和设置。
+花的是你自己的额度，算进发起它的这个会话的花费。等的时候进度写在标准错误；时间长的任务交给 Bash 的后台运行，做完再回来接着做。
+
+高级用法（批量、后台提交过后再取、取消、多轮对话、续接和分叉、写程序调用）：
+  ccrun（提交、查询、等待、取消、号池）和包装 SDK ccviewer_sdk（接口和官方 claude_agent_sdk 一样），
+  说明在 {doc} 开头「快速上手」一节。
+"""
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+import uuid
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
+
+
+def request(req):
+    path = os.environ.get("CC_VIEWER_PERSONA")
+    if not path:
+        raise RuntimeError("找不到查看器本机接口：ccagent 要在网页会话里执行，不能经 SSH 代发")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(20)
+        s.connect(path)
+        s.sendall(json.dumps({"op": "workflow", "request": req}, ensure_ascii=False).encode() + b"\n")
+        buf = bytearray()
+        while not buf.endswith(b"\n"):
+            part = s.recv(65536)
+            if not part:
+                raise RuntimeError("查看器没确认就断开了")
+            buf.extend(part)
+            if len(buf) > 32 << 20:
+                raise RuntimeError("返回超过 32 MB")
+    reply = json.loads(buf)
+    if reply.get("exit"):
+        raise RuntimeError(reply.get("err") or "查看器拒绝了请求")
+    return json.loads(reply["out"])
+
+
+def show_models():
+    m = request({"op": "models"})
+    print("Claude 号（不写 --account 时自动从里面挑；模型：" + "、".join(m["claude_models"]) + "）：")
+    for a in m["claude"]:
+        left = "" if a["predicted_left"] is None else f"，5 小时还剩约 {a['predicted_left']}%"
+        print(f"  {a['account']}：" + ("能用" + left if a["usable"] else "现在用不了（" + a["why_not"] + "）"))
+    if m["named"]:
+        print("点名才用的号（--account 写号，--model 写它接的模型）：")
+        for a in m["named"]:
+            print(f"  {a['account']}：" + "、".join(a["models"]) + ("" if a["usable"] else "（现在用不了：" + a["why_not"] + "）"))
+
+
+def model_of(account):
+    """只写了号、没写模型：用这个号接的第一个模型（Claude 号用 claude-opus-5-5）"""
+    for a in request({"op": "models"})["named"]:
+        if a["account"] == account and a["models"]:
+            return a["models"][0]
+    return "claude-opus-5-5"
+
+
+def build(a, prompt):
+    key = "ccagent-" + uuid.uuid4().hex
+    model = a.model or (model_of(a.account) if a.account else "claude-opus-5-5")
+    common = {"key": key, "account": a.account or "auto", "label": a.label or "ccagent", "timeout": a.timeout,
+              "audit": False}
+    if a.bypass:
+        # 全开：Claude Code 的预设系统提示和全套工具、bypass 模式；读不到运行 Claude 那个用户自己的设置、记忆和连接器
+        cwd = os.path.abspath(a.cwd or os.getcwd())
+        options = {"model": model, "effort": a.effort, "system_prompt": {"type": "preset", "preset": "claude_code"},
+                   "tools": {"type": "preset", "preset": "claude_code"}, "permission_mode": "bypassPermissions",
+                   "setting_sources": [], "skills": [], "strict_mcp_config": True, "cwd": cwd,
+                   "env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}}
+        return {**common, "sdk": {"options": options, "prompt": prompt}}
+    task = {**common, "prompt": prompt, "model": model, "effort": a.effort}
+    files = [os.path.abspath(f) for f in a.read + a.write]
+    if files:
+        for f in files:
+            if not os.path.isfile(f):
+                raise ValueError(f"{f} 不是已有的文件：--read、--write 只收已有的文件，不收目录")
+        root = os.path.commonpath(files)
+        if os.path.isfile(root):
+            root = os.path.dirname(root)
+        task.update(cwd=root, tools=["Read", "Edit", "Write"] if a.write else ["Read"],
+                    read_files=[os.path.abspath(f) for f in a.read], write_files=[os.path.abspath(f) for f in a.write])
+    return task
+
+
+def wait(jid):
+    shown, t0 = None, time.time()
+    while True:
+        r = request({"op": "status", "id": jid})
+        if r["state"] != shown:
+            shown = r["state"]
+            print(f"ccagent：{ {'queued': '排队', 'checking': '挑号', 'running': '在做', 'completed': '做完了'}.get(shown, shown) }"
+                  + (f"（{r['account']}）" if r.get("account") and shown == "running" else "")
+                  + f"，{int(time.time() - t0)} 秒", file=sys.stderr, flush=True)
+        if r["state"] in TERMINAL:
+            return r
+        time.sleep(3)
+
+
+def main():
+    doc = os.path.join(HERE, "WORKFLOWS.md")
+    p = argparse.ArgumentParser(prog="ccagent", description=__doc__.format(doc=doc),
+                                formatter_class=argparse.RawDescriptionHelpFormatter, add_help=True)
+    p.add_argument("task", nargs="*", help="任务（写 models 是列出能用的号和模型）")
+    p.add_argument("-f", dest="file", help="任务文字从这个文件读，- 是标准输入")
+    p.add_argument("--model")
+    p.add_argument("--account")
+    p.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"])
+    # 一次跟一个文件、可以写好几次：写成「后面跟好几个」的话，`--read 稿子.md "任务"` 会把任务也当成文件吃掉
+    p.add_argument("--read", action="append", default=[], metavar="文件")
+    p.add_argument("--write", action="append", default=[], metavar="文件")
+    p.add_argument("--bypass", action="store_true")
+    p.add_argument("--cwd")
+    p.add_argument("--timeout", type=int, default=2400)
+    p.add_argument("--label")
+    a = p.parse_args()
+    jid = None
+    try:
+        if a.task == ["models"] and not a.file:
+            show_models()
+            return 0
+        if a.file:
+            prompt = sys.stdin.read() if a.file == "-" else open(a.file, encoding="utf-8").read()
+            if a.task:
+                prompt = " ".join(a.task) + "\n\n" + prompt
+        else:
+            prompt = " ".join(a.task)
+        if not prompt.strip():
+            p.error("要写任务（或者 -f 任务文件）")
+        if a.bypass and (a.read or a.write):
+            p.error("--bypass 已经全开，不用再写 --read、--write")
+        if a.cwd and not a.bypass:
+            p.error("--cwd 只在 --bypass 时用；--read、--write 时工作目录就是那几个文件所在的目录")
+        r = request({"op": "submit", "task": build(a, prompt)})
+        jid = r["id"]
+        if r["state"] not in TERMINAL:
+            r = wait(jid)
+        jid = None
+        text = (r.get("result") or {}).get("result")
+        if r["state"] == "completed" and not (r.get("result") or {}).get("is_error"):
+            print(text or "", flush=True)
+            return 0
+        if text:
+            print(text, flush=True)
+        print(f"ccagent：子代理没有正常做完（{r['state']}）：{r.get('error') or '回复标了出错'}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        if jid:
+            try:
+                request({"op": "cancel", "id": jid})
+                print("ccagent：已取消", file=sys.stderr)
+            except (OSError, ValueError, RuntimeError):
+                print(f"ccagent：取消没成，任务编号 {jid}，可以用 ccrun cancel 再取消", file=sys.stderr)
+        return 130
+    except (OSError, ValueError, RuntimeError) as e:
+        print(f"ccagent：{e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
