@@ -50,7 +50,7 @@ def _get(account, path, authenticated=False):
         raise CostError('平台账单接口未登记')
     host = instance.RELAY[account]['host']
     port = instance.proxy_port(account)
-    if port:   # 配了代理就经它建隧道，没配就直连
+    if port:   # 配了代理就经它建隧道，没配（打开了 allow_direct）就直连
         conn = http.client.HTTPSConnection('127.0.0.1', port, timeout=5, context=ssl.create_default_context())
         conn.set_tunnel(host, 443)
     else:

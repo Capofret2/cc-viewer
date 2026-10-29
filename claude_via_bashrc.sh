@@ -8,7 +8,7 @@
 # 由 server 自己收尾。SDK 起的子进程不是进程组组长，setsid 不会再分叉，进程号不变。
 # +m 关掉作业控制。没有终端时 bash 会往标准错误打一两行提示，不影响标准输出上的数据流。
 # CC_VIEWER_GATE 是查看器的网络闸门（gate.py）：.bashrc 读完之后才换成它，不然会被 .bashrc 里设的代理改回去。
-# 没有闸门时（开窗服务）用 CC_VIEWER_PROXY：配了代理时这个号的代理，同样在 .bashrc 之后换上；没配就不给，直连。
+# 没有闸门时（开窗服务）用 CC_VIEWER_PROXY：配了代理时这个号的代理，同样在 .bashrc 之后换上；没配（打开了 allow_direct）就不给，直连。
 # 没有同名别名时直接运行 claude，配置目录由查看器经 CLAUDE_CONFIG_DIR 给（instance.json 的 accounts）。
 # CC_VIEWER_CWD：查看器经 sudo 换了用户来拉起时（claude_as_user.sh），它自己进不去会话的工作目录，由这里换好身份以后再切。
 if [ -n "${CC_VIEWER_CWD:-}" ]; then

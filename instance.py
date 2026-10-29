@@ -20,8 +20,9 @@
   terminal_owner 写一个用户名：没记主人的会话（终端里建的）都算他的、只有他自己看得到，
   后台循环再把它们正式记到他名下（账本按记下的主人找会话）。运行 Claude 的系统用户只有一个人在用时才写；
   好几个人共用一个运行 Claude 的系统用户时，终端里建的会话认不出是谁的，不写，照旧是无主会话。
-- 上游代理（可选）：proxy_port 写本机一个 HTTP 代理的端口（比如 7890），查看器拉起的 CLI、刷新额度、查平台余额都经它出网；
-  不写就直连。所有号走同一个。
+- 上游代理（必填）：proxy_port 写本机一个 HTTP 代理的端口（比如 7890），查看器拉起的 CLI、刷新额度、查平台余额都经它出网，所有号走同一个。
+  没写就拒绝启动，不会悄悄直连。确实要直连，得在 instance.json 里亲手写上 "allow_direct": true（模板里是 false），
+  像开服前签 EULA 一样，表示知道直连时服务商会直接看到这台机器的出口地址；打开了也是写了 proxy_port 就照样经代理。
 - 分享链接的地址：share_url 写成 "https://example.com" 这样（不带结尾的斜杠），主动分享时签发的只读链接在它后面接 /share/<随机凭证>。
   不写就用复制的人当时打开页面的地址；局域网地址发给校外的人是打不开的，所以给别人用的实例要写公网入口。
 - 额度换算：quota 写成 {"pts_per_five": 1.96, "five_in_week": 0.133}。pts_per_five 是这组号 5 小时额度的 1% 合多少点
@@ -233,16 +234,24 @@ def remote_billed(account):
 # 限量号：没写进 free 的号全是（回环跟着底层的号走）
 PAID: set[str] = set() if FREE is None else {a for a in ACCOUNTS if base_account(a) not in FREE}
 
-# 上游代理（见开头的说明）：写了 proxy_port 就经本机这个 HTTP 代理出网，不写就直连。所有号走同一个
+# 上游代理（见开头的说明）：写了 proxy_port 就经本机这个 HTTP 代理出网，所有号走同一个。
+# 没写又没亲手打开 allow_direct 时，server 启动就退出（server.py 解析完参数先查），proxy_port() 也抛错：
+# 出网的地方都从 proxy_port() 取端口，哪一处漏了检查也拿不到「直连」这个结果
 DEFAULT_PROXY_PORT: int | None = int(_conf["proxy_port"]) if _conf.get("proxy_port") else None
+ALLOW_DIRECT: bool = _conf.get("allow_direct") is True
+NO_PROXY = ("没配上游代理，拒绝启动：在数据目录的 instance.json 里写上 proxy_port（本机 HTTP 代理的端口）。"
+            f"还没有 instance.json 就先把代码目录里的 instance.example.json 复制成 {_file} 再改。"
+            "确实要不经代理直连，在 instance.json 里亲手把 allow_direct 改成 true（服务商会直接看到这台机器的出口地址）")
 
 
 def proxy_port(account: str) -> int | None:
-    """这个号的网络通讯走本机哪个代理端口；None 是直连。"""
+    """这个号的网络通讯走本机哪个代理端口；None 是直连，只有 instance.json 亲手打开了 allow_direct 才会这样，没打开就抛错。"""
+    if DEFAULT_PROXY_PORT is None and not ALLOW_DIRECT:
+        raise RuntimeError(NO_PROXY)
     return DEFAULT_PROXY_PORT
 
 
-# 账号面板上显示的：代理端口（没配代理是 None，界面上写「直连」）
+# 账号面板上显示的：代理端口（打开了 allow_direct 又没配代理时是 None，界面上写「直连」）
 PROXIES: dict[str, dict | None] = {a: {"port": DEFAULT_PROXY_PORT, "tag": None, "region": ""} if DEFAULT_PROXY_PORT else None
                                    for a in ACCOUNTS}
 

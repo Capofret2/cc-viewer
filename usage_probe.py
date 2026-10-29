@@ -121,7 +121,7 @@ GPT_WINDOWS = {18000: "five_hour", 604800: "seven_day"}   # 用量接口里窗�
 
 def gpt_usage(alias: str) -> dict:
     """问 ChatGPT 的用量接口，返回和 /usage 解析结果一样的 {five_hour: {used_percentage, resets_at}, seven_day: {...}}。
-    配了代理就经代理（instance.proxy_port），没配就直连。
+    配了代理就经代理（instance.proxy_port），没配（打开了 allow_direct）就直连。
     Codex 的登录在查看器自己这边（分用户时放在查看器的系统用户名下，RUN_AS 读不到；翻译层也以查看器的用户跑），所以用 pathlib 读，不经 hostfs。"""
     home = Path(GPT[alias]["codex_home"])
     try:

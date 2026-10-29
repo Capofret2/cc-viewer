@@ -4,7 +4,7 @@
 
 默认是只读模式：只读会话记录、渲染出来，不加载 Claude SDK，也不调用它的任何接口
 （不能发话、不查上下文和账号信息）。要在网页里和 Claude 对话，用 --mode full 启动，
-可以再加 --account 指定默认账号（账号表见 instance.py）、--proxy 指定 server 自己环境里的代理（默认是 instance.json 的 proxy_port，不写就直连；配了代理而代理连不上就拒绝对话）。
+可以再加 --account 指定默认账号（账号表见 instance.py）、--proxy 指定 server 自己环境里的代理（默认是 instance.json 的 proxy_port，没写就拒绝启动，除非亲手打开了 allow_direct；配了代理而代理连不上就拒绝对话）。
 运行时数据写在环境变量 CC_VIEWER_DATA 指定的目录（不设就是代码目录），见 instance.py。
 """
 import argparse
@@ -5486,10 +5486,15 @@ def main():
     ap.add_argument("--mode", choices=("readonly", "full"), default="readonly",
                     help="readonly（默认）：只看会话，不加载也不调用 Claude SDK；full：还能在网页里和 Claude 对话")
     ap.add_argument("--account", help="网页对话默认用的账号（账号表里的某个 cc 别名），不填就用启动 server 的 shell 所用的那个号")
-    ap.add_argument("--proxy", help="server 自己的环境里写的代理，默认是 instance.json 的 proxy_port（不写就直连）；"
+    ap.add_argument("--proxy", help="server 自己的环境里写的代理，默认是 instance.json 的 proxy_port（没写就拒绝启动，除非 instance.json 打开了 allow_direct）；"
                                     "CLI 经网络闸门出网，配了代理而代理连不上就拒绝对话")
     ap.add_argument("--gate-port", type=int, help="网络闸门（gate.py）听的端口，默认 --port 加 1000")
     args = ap.parse_args()
+    from instance import ALLOW_DIRECT, DEFAULT_PROXY_PORT, NO_PROXY
+    if DEFAULT_PROXY_PORT is None and not ALLOW_DIRECT:   # 只读模式也查：没配代理一律不起，不用先证明哪种模式一定不出网
+        ap.error(NO_PROXY)
+    if DEFAULT_PROXY_PORT is None:
+        print("注意：instance.json 打开了 allow_direct、没写 proxy_port，出网都不经代理，直连", flush=True)
     config.gate_port = args.gate_port or args.port + 1000
     config.port = args.port   # 人设卡接口的套接字没配地址时按端口起名（personas.start）
     todos.HERE = str(args.port)   # 共用的待办里记下会话是哪个实例上的（todos.py 开头）

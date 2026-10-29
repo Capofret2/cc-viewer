@@ -112,7 +112,7 @@ CC_VIEWER_DATA=~/.cc-viewer python3 server.py --port 8777 --mode full
 - `accounts`：账号名 → 该账号的 Claude Code 配置目录（`null` 表示默认的 `~/.claude`）
 - `free`：免费账号，花费不记入账本；未写入的账号按用户余额扣费。写了 `accounts` 时必须写这一项，没有免费账号写 `[]`；单用户实例不检查余额，建议写入全部账号
 - `users`、`admins`：开启多用户（各自注册登录，会话互不可见），`admins` 填写管理员的用户名
-- `proxy_port`：本机 HTTP 代理端口，不填则直连
+- `proxy_port`：本机 HTTP 代理端口，必填，不填则拒绝启动。确实要不经代理直连，需在 `instance.json` 中手动将 `allow_direct` 改为 `true`（模板中为 `false`），表示知晓服务商会直接看到本机的出口地址；填了 `proxy_port` 时仍经代理
 - `default_model`、`default_effort`：新会话默认的模型和思考强度
 - `gw_socket`：开启 ssh 门卫，AI 可连接「设备」页登记的服务器
 

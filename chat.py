@@ -50,7 +50,7 @@ AS_USER = str(Path(__file__).parent / "claude_as_user.sh")
 # 实验脚本直接用 Driver 时不设，CLI 照旧直接走代理
 GATE_REQUIRED = False
 
-# server 自己的环境里写的代理（instance.json 的 proxy_port，见 instance.py）；没配就是 None，直连。
+# server 自己的环境里写的代理（instance.json 的 proxy_port，见 instance.py）；没配就是 None、直连（只有 instance.json 亲手打开了 allow_direct 才会这样，不然启动就退出了）。
 # CLI 一律经网络闸门出网，闸门再按 instance.proxy_port 决定经代理还是直连
 PROXY = f"http://127.0.0.1:{DEFAULT_PROXY_PORT}" if DEFAULT_PROXY_PORT else None
 
@@ -372,7 +372,7 @@ def use_proxy(proxy: str | None):
 
 
 def check_proxy(account: str | None = None):
-    """配了代理（instance.proxy_port）而代理端口不通，就拒绝启动 CLI，不悄悄改成直连；没配代理就是直连，不用查。
+    """配了代理（instance.proxy_port）而代理端口不通，就拒绝启动 CLI，不悄悄改成直连；没配代理（打开了 allow_direct）就是直连，不用查；没配又没打开时 proxy_port 自己抛错。
     GPT 号还要它自己的那份翻译层在跑（一个号一份，见 instance.py），API 号要读得到密钥（api_relay.key）。"""
     if account:
         host, port, what = "127.0.0.1", proxy_port(account), f"{account} 走的代理 127.0.0.1:{proxy_port(account)}"
@@ -412,7 +412,7 @@ def launch_env(account: str) -> dict[str, str]:
     # CC_VIEWER_GW：ssh 门卫的套接字（sshgw.py），会话里的 ccssh 从这里找到门卫；没开门卫就不给。
     # CC_VIEWER_PERSONA：人设卡接口的套接字（personas.py），会话里的 ccpersona 从这里找到它
     # CC_VIEWER_PROXY：配了代理时这个号的代理。没有闸门时（开窗服务 keeper）由 claude_via_bashrc.sh 在 .bashrc 之后换上；
-    # 有闸门时闸门优先，闸门自己按同一个端口转。没配代理就不给，直连。
+    # 有闸门时闸门优先，闸门自己按同一个端口转。没配代理（打开了 allow_direct）就不给，直连。
     # CLAUDE_CONFIG_DIR：这个号的配置目录（instance.json 的 accounts）；~/.bashrc 里没有同名别名时启动脚本直接运行 claude，靠它认号
     import personas
     return {"CC_ALIAS": account, "CLAUDE_CODE_ENTRYPOINT": "cli", "CC_VIEWER_LAUNCH": "1",

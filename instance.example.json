@@ -1,7 +1,17 @@
 {
-  "_说明": "复制成数据目录里的 instance.json 再改；每一项的说明见 instance.py 开头。这是单用户、两个 Claude 号、不用代理的写法。",
-  "accounts": {"claude": null, "work": "~/.claude-work"},
-  "free": ["claude", "work"],
+  "_说明": "复制成数据目录里的 instance.json 再改；每一项的说明见 instance.py 开头。这是单用户、两个 Claude 号的写法。",
+  "_proxy_port": "必填：本机 HTTP 代理的端口，Claude Code、查额度、查余额都经它出网。没写就拒绝启动",
+  "proxy_port": 7890,
+  "_allow_direct": "保持 false。确实要不经代理直连时才亲手改成 true（服务商会直接看到这台机器的出口地址）；写了 proxy_port 时照样经代理",
+  "allow_direct": false,
+  "accounts": {
+    "claude": null,
+    "work": "~/.claude-work"
+  },
+  "free": [
+    "claude",
+    "work"
+  ],
   "default_model": "claude-opus-5-5",
   "default_effort": "high"
 }

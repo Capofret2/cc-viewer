@@ -135,7 +135,7 @@ def outgoing(v: dict, secret: str, method: bytes, route: str, headers, body: byt
 
 
 async def connect(host: str, port: int | None, link):
-    """配了代理（port）就经它建 CONNECT 隧道，再校验对方的证书，代理不通时不改成直连；没配代理就直接连这家的服务器。"""
+    """配了代理（port）就经它建 CONNECT 隧道，再校验对方的证书，代理不通时不改成直连；没配代理（instance.json 打开了 allow_direct）就直接连这家的服务器。"""
     if port is None:
         if link is not None:
             link.update(stage="dial", t=time.monotonic())
@@ -362,7 +362,7 @@ def relay_balance(account: str, v: dict, token_file, port: int) -> dict:
 
 def balance(account: str) -> dict:
     """问这家平台这个号还有多少钱（DeepSeek：GET /user/balance；new-api 系中转站：访问令牌查 /api/user/self）。
-    返回 {total 元, granted 赠金, topped 充值, currency, available}；配了代理就经代理（instance.proxy_port），没配就直连。出错抛 RuntimeError，说明里不带密钥。"""
+    返回 {total 元, granted 赠金, topped 充值, currency, available}；配了代理就经代理（instance.proxy_port），没配（打开了 allow_direct）就直连。出错抛 RuntimeError，说明里不带密钥。"""
     from instance import proxy_port, RELAY
     refuse_remote(account)
     v = vendor(account)
@@ -375,7 +375,7 @@ def balance(account: str) -> dict:
         return {"unavailable": "未接入余额查询"}
     req = urllib.request.Request(f"https://{v['host']}{v['balance']}",
                                  headers={"Authorization": f"Bearer {key(account)}", "Accept": "application/json"})
-    port = proxy_port(account)   # ProxyHandler({}) 不读环境变量里的代理，没配就是直连
+    port = proxy_port(account)   # ProxyHandler({}) 不读环境变量里的代理，没配（打开了 allow_direct）就是直连
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({"https": f"http://127.0.0.1:{port}"} if port else {}))
     try:
         with opener.open(req, timeout=20) as r:
@@ -400,7 +400,7 @@ def balance(account: str) -> dict:
 def quota(account: str) -> dict:
     """订阅制的 API 号（智谱）：5 小时和本周额度各用了百分之几（接口只给整数百分比）、什么时候重置。
     返回 {five, week 用了百分之几, five_reset, week_reset（unix 秒）, level 套餐档}；和余额存在同一处（usage_probe.save_balance），
-    另记一份历史，以后拿读数和调用的 token 数拟合单价。配了代理就经代理，没配就直连。"""
+    另记一份历史，以后拿读数和调用的 token 数拟合单价。配了代理就经代理，没配（打开了 allow_direct）就直连。"""
     from instance import proxy_port
     refuse_remote(account)
     v = vendor(account)
