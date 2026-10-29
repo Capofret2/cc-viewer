@@ -57,7 +57,7 @@ def _get(account, path, authenticated=False):
         conn = http.client.HTTPSConnection(host, 443, timeout=5, context=ssl.create_default_context())
     headers = {'Accept': 'application/json', 'Connection': 'close'}
     if authenticated:
-        # 只用这把钥匙查它自己的消费；IKunCode 的日志接口不认账号访问令牌（实测 401），
+        # 只用这把钥匙查它自己的消费；有的站的日志接口不认账号访问令牌（实测 401），
         # 同站第二把令牌（model_keys 并号）的消费拉不到实扣，按配置单价预估
         headers['Authorization'] = 'Bearer ' + api_relay.key(account)
     try:

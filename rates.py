@@ -26,7 +26,8 @@ GPT_PRICE = 0.3
 FEN = 5
 YUAN = 100 / FEN / PRICE
 # 有的中转站的 Opus 5.5 渠道回包出现过点号写法；只共用已配置的账号价，不改变请求或原始模型名。
-RESPONSE_PRICE_ALIASES = {'blanka': {'claude-opus-5.5': 'claude-opus-5-5'}}
+# 按中转站的 vendor 写：{'某站': {'claude-opus-5.5': 'claude-opus-5-5'}}，回包里的左边按右边的单价算
+RESPONSE_PRICE_ALIASES: dict[str, dict[str, str]] = {}
 
 
 def api_price(account, model):
